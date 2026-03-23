@@ -62,15 +62,14 @@ Task Classifier
      └── Complex Task ──→ Planner ──→ Supervisor
                                            │
                     ┌──────────────────────┼──────────────────────┐
-                    ▼                      ▼                       ▼
+                    ▼                      ▼                      ▼
                Researcher          Deep Researcher          Email Composer
-                    │                      │                  LinkedIn Composer
+                    │                      │                LinkedIn Composer
                     └──────────────────────┘
-                                           │
-                                      Human Gate
-                                  (approve / reject)
-                                           │
-                                    Email / LinkedIn Send
+                                           │                       │
+                                           │                   Human Gate
+                                           │            (approve / reject with feedback)
+                                           ┌─────────        Email / LinkedIn Send
                                            │
                                        Validator
                                            │
@@ -83,14 +82,14 @@ Task Classifier
 
 | Agent | Model | Purpose |
 |-------|-------|---------|
-| Supervisor | gemini-2.0-flash-lite | Orchestrates tasks, routes to agents, synthesises results |
+| Supervisor | gemini-3.1-flash-lite | Orchestrates tasks, routes to agents, synthesises results |
 | Planner | gemma-3-27b-it | Breaks complex requests into ordered subtasks |
 | Researcher | gemma-3-12b-it | Quick web search — news, facts, prices |
-| Deep Researcher | gemini-2.0-flash-lite | Full page reading — documentation, technical articles, URLs |
+| Deep Researcher | gemini-3.1-flash-lite | Full page reading — documentation, technical articles, URLs |
 | Email Composer | gemma-3-4b-it | Writes email drafts with layout and language support |
 | LinkedIn Composer | gemma-3n-e4b-it | Writes LinkedIn post drafts with media support |
 | Task Classifier | gemma-3-27b-it | Determines if a request is simple or multi-step |
-| Memory | gemini-2.0-flash-lite | Rolling context compression (only runs at threshold) |
+| Memory | gemini-3.1-flash-lite | Rolling context compression (only runs at threshold) |
 | Validator | gemma-3n-e2b-it | Validates supervisor response before delivery |
 
 ### Why All Messages Are HumanMessage

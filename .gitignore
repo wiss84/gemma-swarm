@@ -55,6 +55,9 @@ workspaces/
 future_integrations/
 tests/
 
+# batch file
+gemma-swarm.bat
+
 # State files
 linkedin_state.json
 thread_registry.json
