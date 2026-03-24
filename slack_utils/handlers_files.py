@@ -446,7 +446,7 @@ def register_file_handlers(app, run_agent_fn=None):
             
             # Build the message for the agent
             if user_message:
-                agent_message = f"Human request: {user_message}\n\nFile Name: {file_name}\nFile Content:\n{file_content}"
+                agent_message = f"Human request: {user_message}\n\nFile Name: [{file_name}]\nFile Content:\n[{file_content}]"
             else:
                 agent_message = f"File Name: {file_name}\nContent:\n{file_content}"
             
