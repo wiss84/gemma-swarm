@@ -94,6 +94,10 @@ MAX_TOOL_ITERATIONS = 15
 
 CONTEXT_SUMMARIZE_THRESHOLD  = 0.10   # 10% → trigger summarization (~12,800 tokens)
 
+# ── File Processing Limits ─────────────────────────────────────────────────────────
+
+MAX_CONTEXT_CHARS = 40000   # Max chars from file content (~10K tokens for 15K context)
+
 
 # ── LangGraph Settings ─────────────────────────────────────────────────────────
 

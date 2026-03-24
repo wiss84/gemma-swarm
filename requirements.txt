@@ -22,8 +22,11 @@ pydantic>=2.0.0
 python-dotenv>=1.0.0
 google-genai>=1.66.0
 google-api-core
+requests
 
 # ── File processing ─────────────────────────────────────────────────────────
-Pillow
+Pillow          # For converting images to PNG format
 ffmpeg
-requests
+pandas          # For CSV/Excel spreadsheet processing
+PyPDF2          # For PDF text extraction
+python-docx     # For Word document (.docx) reading

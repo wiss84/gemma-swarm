@@ -12,7 +12,8 @@ import requests
 from pathlib import Path
 
 from slack_utils.thread_state import get_thread_state, get_current_session
-from agents_utils.config import WORKSPACE_ROOT, SLACK_BOT_TOKEN
+from agents_utils.config import WORKSPACE_ROOT, SLACK_BOT_TOKEN, MAX_CONTEXT_CHARS
+from agents_utils.file_processor import file_processor
 
 logger = logging.getLogger(__name__)
 
@@ -58,19 +59,6 @@ def register_file_handlers(app, run_agent_fn=None):
         except Exception as e:
             logger.warning(f"[files] Could not fetch thread messages: {e}")
             return ""
-    
-    def _preprocess_text_file(file_path: Path) -> str:
-        """Basic text preprocessing - extract text content from text files."""
-        try:
-            # Try to read as UTF-8 text
-            content = file_path.read_text(encoding="utf-8")
-            # Truncate if too long (limit to ~50KB for context)
-            if len(content) > 50000:
-                content = content[:50000] + "\n... [truncated]"
-            return content
-        except Exception as e:
-            logger.warning(f"[files] Could not read text file: {e}")
-            return "[Could not extract text content]"
     
     @app.event("file_shared")
     def handle_file_shared(event, client):
@@ -441,10 +429,18 @@ def register_file_handlers(app, run_agent_fn=None):
         saved_path = _download_and_save_file(client, file_id, file_name, target_dir)
         
         if saved_path:
-            # Preprocess file content (extract text for text files)
-            file_content = _preprocess_text_file(saved_path)
+            # Preprocess file content using file_processor
+            result = file_processor.extract_content(str(saved_path))
             
-            # Build the message for the agent
+            # Handle extraction result
+            if result.get("error"):
+                file_content = f"[Error processing file: {result['error']}]"
+            else:
+                file_content = result.get("content", "")
+            
+            # Truncate if too long for context
+            if len(file_content) > MAX_CONTEXT_CHARS:
+                file_content = file_content[:MAX_CONTEXT_CHARS] + "\n... [truncated]"
             if user_message:
                 agent_message = f"Human request: {user_message}\n\nFile Name: [{file_name}]\nFile Content:\n[{file_content}]"
             else:
