@@ -37,15 +37,27 @@ EMAIL_LAYOUTS_DIR = PROJECT_ROOT / "email_layouts"
 
 # ── Model Assignments ──────────────────────────────────────────────────────────
 
+# MODELS = {
+#     "supervisor":        "gemini-3.1-flash-lite-preview",
+#     "planner":           "gemma-3-27b-it",
+#     "researcher":        "gemma-3-12b-it",
+#     "deep_researcher":   "gemini-3.1-flash-lite-preview",
+#     "email_composer":    "gemma-3-4b-it",
+#     "linkedin_composer": "gemma-3n-e4b-it",
+#     "task_classifier":   "gemma-3-27b-it",
+#     "memory":            "gemini-3.1-flash-lite-preview", # runs only on compression trigger threshold
+#     "validator":         "gemma-3n-e2b-it"
+# }
+
 MODELS = {
-    "supervisor":        "gemini-3.1-flash-lite-preview",
+    "supervisor":        "gemma-3-27b-it",
     "planner":           "gemma-3-27b-it",
     "researcher":        "gemma-3-12b-it",
-    "deep_researcher":   "gemini-3.1-flash-lite-preview",
+    "deep_researcher":   "gemma-3-12b-it",
     "email_composer":    "gemma-3-4b-it",
     "linkedin_composer": "gemma-3n-e4b-it",
     "task_classifier":   "gemma-3-27b-it",
-    "memory":            "gemini-3.1-flash-lite-preview", # runs only on compression trigger threshold
+    "memory":            "gemma-3-4b-it", # runs only on compression trigger threshold
     "validator":         "gemma-3n-e2b-it"
 }
 

@@ -16,7 +16,7 @@ load_dotenv()
 
 from agents_utils.memory import create_workspace, list_workspaces
 from agents_utils.config import WORKSPACE_ROOT, USER_PREFERENCES_FILE
-from slack_utils.thread_state import get_thread_state, save_thread_workspace, get_project_original_thread
+from slack_utils.thread_state import get_thread_state, save_thread_workspace, get_project_original_thread, set_current_session
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +264,9 @@ def activate_workspace(thread_ts, channel, workspace_path, project_name, client,
     state.active_thread_id = thread_ts
     state.active_channel    = channel
     state.channel_id        = channel
+    
+    # Set current session for file upload handling
+    set_current_session(project_name, channel, thread_ts)
 
     # Check if this project already has a LangGraph thread with history
     existing_thread = get_project_original_thread(project_name)

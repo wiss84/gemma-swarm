@@ -11,7 +11,7 @@ import logging
 import requests
 from pathlib import Path
 
-from slack_utils.thread_state import get_thread_state
+from slack_utils.thread_state import get_thread_state, get_current_session
 from agents_utils.config import WORKSPACE_ROOT, SLACK_BOT_TOKEN
 
 logger = logging.getLogger(__name__)
@@ -87,14 +87,24 @@ def register_file_handlers(app, run_agent_fn=None):
             logger.error(f"[files] Could not fetch file info: {e}")
             return
         
-        # Get channel and thread info from multiple sources
+        # Get channel info from event
         channel_id = event.get("channel_id", "")
         thread_ts = event.get("thread_ts", event.get("ts", ""))
         
-        # If no thread_ts, find workspace by matching channel_id
-        # Slack's file_shared event doesn't include thread_ts when file is uploaded in a thread
-        if not thread_ts:
-            if channel_id:
+        # Use current session variables if available and channel matches
+        if not thread_ts and channel_id:
+            current_project, current_channel, current_thread = get_current_session()
+            
+            # Use current session if in the same channel
+            if current_project and current_channel and current_thread:
+                if current_channel == channel_id:
+                    thread_ts = current_thread
+                    logger.info(f"[files] Using current session: {thread_ts} ({current_project})")
+                else:
+                    logger.warning(f"[files] File uploaded in different channel ({channel_id}) than current session ({current_channel}). Please mention the bot and select workspace first.")
+                    return
+            else:
+                # Fallback to registry matching if no current session
                 from slack_utils.thread_state import get_threads_registry
                 registry = get_threads_registry()
                 
@@ -106,22 +116,10 @@ def register_file_handlers(app, run_agent_fn=None):
                         logger.info(f"[files] Found workspace for channel {channel_id}: {thread_ts} ({state.project_name})")
                         break
                 
-                # If no match for channel, use the most recent workspace
+                # If no match for channel, show warning
                 if not thread_ts:
-                    workspace_threads = [
-                        (ts, state) for ts, state in registry.items()
-                        if state.workspace_path and state.project_name
-                    ]
-                    if workspace_threads:
-                        workspace_threads.sort(key=lambda x: x[0])
-                        thread_ts, state = workspace_threads[-1]
-                        logger.info(f"[files] Using most recent workspace: {thread_ts} ({state.project_name})")
-                    else:
-                        logger.warning(f"[files] No workspace found. Please mention the bot and select workspace first.")
-                        return
-            else:
-                logger.warning(f"[files] No thread_ts or channel_id found in file_shared event")
-                return
+                    logger.warning(f"[files] No workspace found for channel {channel_id}. Please mention the bot and select workspace first.")
+                    return
         
         # Check if workspace is already selected for this thread
         state = get_thread_state(thread_ts)

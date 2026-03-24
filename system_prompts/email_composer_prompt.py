@@ -23,7 +23,7 @@ You must ALWAYS respond with ONLY this JSON block:
 EMAIL WRITING GUIDELINES:
 - "to": list of recipient email addresses extracted from the supervisor instructions
 - "subject": clear, concise subject line
-- "message": complete email body written in the specified language with correct grammar, dont write blank placeholders
+- "message": complete email body written in the specified language, without any empty placeholders for names, dates, etc. (e.g. [your name] )
 - "language": the language to write in (default: english). If another language is requested, write the ENTIRE message body in that language including greeting and closing.
 - "layout": "official" (formal, business) or "casual" (relaxed, friendly). Default: casual.
 - "attachments": list of filenames in the email_attachments folder. Empty list if none.

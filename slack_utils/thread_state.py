@@ -50,6 +50,26 @@ class ThreadState:
 _threads: dict[str, ThreadState] = {}
 _threads_lock = threading.Lock()
 
+# ── Current Active Session Variables ───────────────────────────────────────────────
+# Track the currently active project for file upload handling
+_current_project_name: str = ""
+_current_channel_id: str = ""
+_current_thread_id: str = ""
+
+
+def set_current_session(project_name: str, channel_id: str, thread_id: str):
+    """Set the current active session variables."""
+    global _current_project_name, _current_channel_id, _current_thread_id
+    _current_project_name = project_name
+    _current_channel_id = channel_id
+    _current_thread_id = thread_id
+    logger.info(f"[thread_state] Current session set: {project_name} (channel: {channel_id}, thread: {thread_id})")
+
+
+def get_current_session() -> tuple[str, str, str]:
+    """Get the current active session variables."""
+    return _current_project_name, _current_channel_id, _current_thread_id
+
 
 # ── Thread Registry Persistence ────────────────────────────────────────────────
 
