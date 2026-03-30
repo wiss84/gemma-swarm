@@ -24,6 +24,11 @@ from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Custom exception for Gemini fallback trigger
+class GeminiFallbackRequired(Exception):
+    """Raised when Gemini model needs to fallback to Gemma."""
+    pass
+
 # Single shared file for all models
 PERSISTENCE_FILE = "rate_limit_state.json"
 
@@ -116,11 +121,13 @@ class RateLimitHandler:
         tokens_per_minute: int | None = None,
         requests_per_day: int | None = None,
         max_retries: int = 5,
-        base_backoff: float = 3.0,
-        safety_margin: float = 0.7,
+        max_retries_service_unavailable: int | None = None,
+        base_backoff: float = 2.0,
+        safety_margin: float = 0.8,
     ):
         self.model_name = model_name
         self.max_retries = max_retries
+        self.max_retries_service_unavailable = max_retries_service_unavailable if max_retries_service_unavailable is not None else max_retries
         self.base_backoff = base_backoff
         self.on_wait: Callable | None = None  # Callback for rate limit wait events
 
@@ -349,6 +356,9 @@ class RateLimitHandler:
         tpm_check_tokens = input_tokens if input_tokens > 0 else estimated_tokens
         last_exception = None
 
+        # Track ServiceUnavailable separately from other retries
+        service_unavailable_attempts = 0
+
         for attempt in range(self.max_retries):
             self._wait_if_needed(tpm_check_tokens)
 
@@ -373,8 +383,10 @@ class RateLimitHandler:
                     )
                     _gemini_fallback_used = True
                     _gemini_fallback_agents.append(self.model_name)
-                    # Raise to signal caller to switch model
-                    raise
+                    raise GeminiFallbackRequired(
+                        f"Gemini daily quota exhausted for {self.model_name}. "
+                        f"Fallback to gemma-3-27b-it required."
+                    )
                 
                 # For transient 429s, retry with backoff
                 google_delay   = self._parse_retry_delay(error_str)
@@ -393,10 +405,32 @@ class RateLimitHandler:
 
             except ServiceUnavailable as e:
                 last_exception = e
+                service_unavailable_attempts += 1
+                
+                # Check if we've exceeded the ServiceUnavailable retry limit
+                if service_unavailable_attempts >= self.max_retries_service_unavailable:
+                    logger.error(
+                        f"[{self.model_name}] ServiceUnavailable retries exhausted "
+                        f"({service_unavailable_attempts}/{self.max_retries_service_unavailable})."
+                    )
+                    # Check if this is a Gemini model - trigger fallback to Gemma
+                    if self.model_name.startswith("gemini-") and not _gemini_fallback_used:
+                        logger.error(
+                            f"[{self.model_name}] ServiceUnavailable exhausted on Gemini. "
+                            f"Triggering Gemini→Gemma fallback."
+                        )
+                        _gemini_fallback_used = True
+                        _gemini_fallback_agents.append(self.model_name)
+                        raise GeminiFallbackRequired(
+                            f"Gemini ServiceUnavailable exhausted for {self.model_name}. "
+                            f"Fallback to gemma-3-27b-it required."
+                        )
+                    raise last_exception
+                
                 backoff = self.base_backoff * (2 ** attempt)
                 logger.warning(
                     f"[{self.model_name}] ServiceUnavailable on attempt "
-                    f"{attempt + 1}/{self.max_retries}. Backing off {backoff:.1f}s."
+                    f"{service_unavailable_attempts}/{self.max_retries_service_unavailable}. Backing off {backoff:.1f}s."
                 )
                 time.sleep(backoff)
 

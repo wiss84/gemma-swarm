@@ -121,7 +121,7 @@ def response_validator_node(state: AgentState) -> dict:
     # These are legitimate outcomes (attachment blocked, API failed, etc.)
     # Validator should not loop trying to "fix" a correctly reported failure
     failure_markers = ["❌", "attachment type", "not allowed", "failed to send", 
-                       "could not", "authentication failed", "no recipients"]
+                       "could not", "error","authentication failed", "no recipients", "an issue"]
     if any(marker.lower() in response_text.lower() for marker in failure_markers):
         logger.info("[validator] Response contains failure/error report — passing through.")
         return {"next_node": "output_formatter"}
@@ -146,11 +146,11 @@ def _handle_invalid(state, messages, retry_counts, reason) -> dict:
     if validator_retries >= max_retries:
         logger.warning("[validator] Max retries reached — escalating to human.")
         return {
-            "next_node":             "human_gate",
+            "next_node": "human_gate",
             "requires_confirmation": True,
             "pending_confirmation": (
                 f"Response validator failed {max_retries} times.\n"
-                f"Last reason: {reason}\nShould I try again or stop here?"
+                f"Last reason: {reason}\nShould I try again?"
             ),
             "retry_counts": {**retry_counts, "validator": validator_retries + 1},
         }

@@ -8,7 +8,7 @@ Gemma Swarm can research the web, compose and send emails, create and publish Li
 
 ---
 
-## Why Completely Free?
+## Completely Free
 
 Every component in this project was deliberately chosen to avoid paid APIs:
 
@@ -18,6 +18,7 @@ Every component in this project was deliberately chosen to avoid paid APIs:
 | **Web search** | Jina AI — free API key, no signup required |
 | **Email sending** | Gmail SMTP — free with a Gmail App Password |
 | **LinkedIn posting** | LinkedIn API — free with a developer app |
+| **Google Workspace** | Gmail, Calendar, Docs, Sheets APIs — free with OAuth |
 | **Slack integration** | Slack Bolt — free for personal and small team workspaces |
 | **Conversation memory** | SQLite via LangGraph checkpointing — local file, no cloud |
 
@@ -26,6 +27,10 @@ Every component in this project was deliberately chosen to avoid paid APIs:
 ## Features
 
 - 🤖 **Multi-Agent Orchestration** — Supervisor, Planner, Researcher, Deep Researcher, Email Composer, LinkedIn Composer, Memory Agent, Task Classifier
+- 📧 **Gmail Integration** — read, search, and manage your Gmail inbox
+- 📅 **Google Calendar** — create, read, and manage calendar events
+- 📄 **Google Docs** — create and edit documents
+- 📊 **Google Sheets** — create and manage spreadsheets
 - 💬 **Slack-Native** — full human-in-the-loop confirmations, interrupt handling, file uploads, and real-time status updates
 - 📧 **Email Automation** — compose, review, and send emails via Gmail SMTP with attachment support
 - 💼 **LinkedIn Posting** — create and publish posts with image, video, and document (PDF/PPTX) attachments
@@ -65,6 +70,10 @@ Task Classifier
                     ▼                      ▼                      ▼
                Researcher          Deep Researcher          Email Composer
                     │                      │                LinkedIn Composer
+                    │                      │                   Gmail Agent
+                    │                      │                Calendar Agent
+                    │                      │                   Docs Agent
+                    │                      │                  Sheets Agent
                     └──────────────────────┘
                                            │                       │
                                            │                   Human Gate
@@ -82,45 +91,29 @@ Task Classifier
 
 | Agent | Model | Purpose |
 |-------|-------|---------|
-| Supervisor | gemini-3.1-flash-lite | Orchestrates tasks, routes to agents, synthesises results |
+| Supervisor | gemma-3-27b-it | Orchestrates tasks, routes to agents, synthesises results |
 | Planner | gemma-3-27b-it | Breaks complex requests into ordered subtasks |
 | Researcher | gemma-3-12b-it | Quick web search — news, facts, prices |
-| Deep Researcher | gemini-3.1-flash-lite | Full page reading — documentation, technical articles, URLs |
+| Deep Researcher | gemma-3-12b-it | Full page reading — documentation, technical articles, URLs |
 | Email Composer | gemma-3-4b-it | Writes email drafts with layout and language support |
 | LinkedIn Composer | gemma-3n-e4b-it | Writes LinkedIn post drafts with media support |
+| Gmail Agent | gemma-3-4b-it | Reads and searches Gmail messages |
+| Calendar Agent | gemma-3-4b-it | Creates and manages calendar events |
+| Docs Agent | gemma-3-4b-it | Creates and edits Google Docs |
+| Sheets Agent | gemma-3-4b-it | Creates and manages Google Sheets |
 | Task Classifier | gemma-3-27b-it | Determines if a request is simple or multi-step |
-| Memory | gemini-3.1-flash-lite | Rolling context compression (only runs at threshold) |
+| Memory | gemma-3-4b-it | Rolling context compression (only runs at threshold) |
 | Validator | gemma-3n-e2b-it | Validates supervisor response before delivery |
 
-### Why All Messages Are HumanMessage
+### All Messages Are HumanMessage
 
-Gemma models are **instruction-tuned** models. Unlike OpenAI or Anthropic models that support distinct `system`, `assistant`, and `user` roles, Gemma only reliably understands the `human` turn in a conversation. Every message in the pipeline — system prompts, agent results, tool outputs, and user messages — is wrapped as a `HumanMessage` with a label prefix (e.g. `[SUPERVISOR]`, `[RESEARCHER RESULT]`, `[HUMAN]`) so the model can distinguish the source without relying on role types it was not trained to handle.
+Gemma models are **instruction-tuned** models. Unlike  Gemini, OpenAI or Anthropic models that support distinct `system`, `assistant`, and `user` roles, Gemma only reliably understands the `human` turn in a conversation. Every message in the pipeline — system prompts, agent results, tool outputs, and user messages — is wrapped as a `HumanMessage` with a label prefix (e.g. `[SUPERVISOR]`, `[RESEARCHER RESULT]`, `[HUMAN]`) so the model can distinguish the source without relying on role types it was not trained to handle.
 
 ---
 
 ## Rate Limits (Free Tier)
 
-Gemma Swarm uses two types of models with different free tier limits:
-
-**Gemini models** (Supervisor, Deep Researcher, Memory):
-
-| Limit | Value |
-|-------|-------|
-| Requests per minute | 15 |
-| Tokens per minute | 250,000 |
-| Daily requests | 500 |
-
-**Gemma models** (all other agents):
-
-| Limit | Value |
-|-------|-------|
-| Requests per minute | 30 |
-| Tokens per minute | 15,000 |
-| Daily requests | 14,400 |
-
-**Automatic Gemini → Gemma fallback:** When the Gemini daily limit of 500 requests is exhausted, all Gemini-based agents (Supervisor, Deep Researcher, Memory) automatically switch to `gemma-3-27b-it` for the rest of the session. On the next app restart, if a new calendar day is detected, the daily counter resets to 0 and agents resume using their configured Gemini models.
-
-The built-in rate limit handler tracks all requests proactively, waits automatically when limits approach, and posts countdown messages in Slack so you always know what is happening.
+Gemma Swarm uses Google's free tier for Gemma models:
 
 ---
 
@@ -132,11 +125,12 @@ Before you begin, you will need API keys and credentials for the services you wa
 
 | Service | Required | Setup Guide |
 |---------|----------|-------------|
-| Google Gemini API | ✅ Yes | [Get API Key](https://aistudio.google.com/u/0/api-keys) |
+| Google Gemma API | ✅ Yes | [Get API Key](https://aistudio.google.com/u/0/api-keys) |
 | Jina AI (web search) | ✅ Yes | [Get API Key](https://jina.ai/) — no signup required |
 | Slack | ✅ Yes | [Slack Workflow Setup](SLACK_WORKFLOW_SETUP.md) |
 | Gmail (email sending) | ✅ Yes | [Email Workflow Setup](Email_WORKFLOW_SETUP.md) |
 | LinkedIn (posting) | ✅ Yes | [LinkedIn Workflow Setup](LINKEDIN_WORKFLOW_SETUP.md) |
+| Google Workspace (Gmail, Calendar, Docs, Sheets) | ✅ Yes | [Google Workflow Setup](Google_WORKFLOW_SETUP.md) |
 
 ---
 
@@ -175,7 +169,7 @@ python slack_app.py
 Create a `.env` file in the project root:
 
 ```bash
-# Google Gemini API (required)
+# Google Gemma API (required)
 GOOGLE_API_KEY=your_google_api_key
 
 # Jina AI — web search (required)
@@ -192,6 +186,9 @@ EMAIL_PASS=your_gmail_app_password
 # LinkedIn — posting
 LINKEDIN_CLIENT_ID=your_linkedin_client_id
 LINKEDIN_CLIENT_SECRET=your_linkedin_client_secret
+
+# Google Workspace — OAuth credentials (place Google_creds.json in project root)
+# See Google_WORKFLOW_SETUP.md for setup instructions
 
 # LangSmith — tracing (optional, for debugging)
 LANGCHAIN_TRACING_V2=true
@@ -229,9 +226,18 @@ Each agent's system prompt lives in `system_prompts/` as a standalone `.py` file
 ```
 system_prompts/
 ├── supervisor_prompt.py        # Routing rules, agent descriptions
+├── planner_prompt.py           # Task decomposition logic
 ├── researcher_prompt.py        # Search and citation instructions
+├── deep_researcher_prompt.py   # Full page reading instructions
 ├── email_composer_prompt.py    # Email format and language rules
-└── memory_prompt.py            # Summarization instructions
+├── linkedin_composer_prompt.py # LinkedIn post formatting
+├── gmail_agent_prompt.py       # Gmail read/search operations
+├── calendar_agent_prompt.py    # Calendar event management
+├── docs_agent_prompt.py        # Google Docs creation/editing
+├── sheets_agent_prompt.py      # Google Sheets management
+├── task_classifier_prompt.py   # Simple vs complex task detection
+├── memory_prompt.py            # Summarization instructions
+└── validator_prompt.py         # Response validation rules
 ```
 
 ---

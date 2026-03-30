@@ -58,15 +58,24 @@ def build_workspace_blocks(thread_ts: str) -> list:
             "type": "section",
             "text": {"type": "mrkdwn", "text": "*Or continue an existing project:*"},
         })
-        elements = []
-        for name in existing[:5]:
-            elements.append({
-                "type":      "button",
-                "text":      {"type": "plain_text", "text": f"📁 {name}", "emoji": True},
-                "action_id": f"workspace_existing_{name}",
-                "value":     f"{thread_ts}|{name}",
+        # Build options for select menu (max 100)
+        options = []
+        for name in existing:
+            options.append({
+                "text": {"type": "plain_text", "text": name},
+                "value": name,
             })
-        blocks.append({"type": "actions", "elements": elements})
+        blocks.append({
+            "type": "input",
+            "block_id": "workspace_select_block",
+            "label": {"type": "plain_text", "text": "Select a project"},
+            "element": {
+                "type": "static_select",
+                "action_id": "workspace_existing_select",
+                "placeholder": {"type": "plain_text", "text": "Select a project..."},
+                "options": options[:100],
+            },
+        })
 
     # Always add "Set Preferences" button so user can update anytime
     blocks.append({
@@ -379,23 +388,22 @@ def register_workspace_handlers(app, run_agent_fn=None):
         )
 
 
-    @app.action(re.compile(r"workspace_existing_.+"))
-    def handle_workspace_existing(ack, body, client, say):
+    @app.action("workspace_existing_select")
+    def handle_workspace_existing_select(ack, body, client, say):
+        """Handle selecting a project from the dropdown menu."""
         ack()
-        value     = body["actions"][0]["value"]
-        parts     = value.split("|", 1)
-        thread_ts = parts[0]
-        name      = parts[1] if len(parts) > 1 else ""
-        channel   = body["channel"]["id"]
+        project_name = body["actions"][0]["selected_option"]["value"]
+        thread_ts   = body["container"]["thread_ts"]
+        channel     = body["channel"]["id"]
 
-        if not name:
+        if not project_name:
             return
 
         activate_workspace(
             thread_ts=thread_ts,
             channel=channel,
-            workspace_path=str(WORKSPACE_ROOT / name),
-            project_name=name,
+            workspace_path=str(WORKSPACE_ROOT / project_name),
+            project_name=project_name,
             client=client,
             run_agent_fn=_run_agent,
             say=say,

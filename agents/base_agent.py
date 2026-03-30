@@ -29,7 +29,7 @@ from agents_utils.json_parser import _extract_json
 logger = logging.getLogger(__name__)
 
 # Agents that use their own independent history
-INDEPENDENT_HISTORY_AGENTS = {"researcher", "deep_researcher", "email_composer", "linkedin_composer"}
+INDEPENDENT_HISTORY_AGENTS = {"researcher", "deep_researcher", "email_composer", "linkedin_composer", "gmail_agent", "calendar_agent", "docs_agent", "sheets_agent"}
 
 # Agents that see only the latest human message
 LATEST_HUMAN_ONLY_AGENTS = {"planner", "task_classifier"}
@@ -43,6 +43,10 @@ AGENT_HISTORY_FIELD = {
     "deep_researcher":   "deep_researcher_history",
     "email_composer":    "email_history",
     "linkedin_composer": "linkedin_history",
+    "gmail_agent":       "gmail_history",
+    "calendar_agent":    "calendar_history",
+    "docs_agent":        "docs_history",
+    "sheets_agent":      "sheets_history",
 }
 
 

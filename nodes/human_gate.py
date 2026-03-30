@@ -315,6 +315,75 @@ def build_linkedin_feedback_modal(thread_ts: str) -> dict:
     }
 
 
+def build_google_preview_blocks(result_text: str, thread_ts: str) -> list:
+    """
+    Google write action preview with Confirm and Reject (opens feedback modal) buttons.
+    Shows the result of the action (e.g. doc link, event details) for the user to review.
+    """
+    preview = result_text[:10000] + "..." if len(result_text) > 10000 else result_text
+ 
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "🔵 *Google Action — Please Review*"},
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": preview},
+        },
+        {"type": "divider"},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type":      "button",
+                    "text":      {"type": "plain_text", "text": "✅ Confirm", "emoji": True},
+                    "style":     "primary",
+                    "action_id": "google_approve",
+                    "value":     thread_ts,
+                },
+                {
+                    "type":      "button",
+                    "text":      {"type": "plain_text", "text": "✏️ Reject & Give Feedback", "emoji": True},
+                    "style":     "danger",
+                    "action_id": "google_reject_feedback",
+                    "value":     thread_ts,
+                },
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"_No response in {HUMAN_CONFIRMATION_TIMEOUT // 60} minutes → defaults to Reject_"}
+            ],
+        },
+    ]
+
+def build_google_feedback_modal(thread_ts: str) -> dict:
+    """Feedback modal for Google write action rejection."""
+    return {
+        "type":             "modal",
+        "callback_id":      "google_feedback_modal",
+        "private_metadata": thread_ts,
+        "title":            {"type": "plain_text", "text": "Reject Google Action"},
+        "submit":           {"type": "plain_text", "text": "Submit Feedback"},
+        "close":            {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type":    "input",
+                "block_id": "feedback_block",
+                "label":   {"type": "plain_text", "text": "What should be changed?"},
+                "element": {
+                    "type":        "plain_text_input",
+                    "action_id":   "feedback_input",
+                    "multiline":   True,
+                    "placeholder": {"type": "plain_text", "text": "e.g. Change the event time to 3pm, update the title..."},
+                },
+            }
+        ],
+    }
+
 def human_gate_node(state: AgentState, client=None) -> dict:
     """
     LangGraph node for human-in-the-loop confirmation.
@@ -339,6 +408,7 @@ def human_gate_node(state: AgentState, client=None) -> dict:
                 "human_decision":        "rejected",  # Default for interrupt = continue
                 "awaiting_human":        False,
                 "requires_confirmation": False,
+                "google_requires_confirmation": False,
                 "is_interrupted":         False,  # Clear interrupt flag
                 "next_node":             "supervisor",
                 "active_agent":          active_agent,
@@ -349,6 +419,7 @@ def human_gate_node(state: AgentState, client=None) -> dict:
             "human_decision":        "approved",
             "awaiting_human":        False,
             "requires_confirmation": False,
+            "google_requires_confirmation": False,
             "next_node":             _resolve_next_node(state, "approved"),
             "active_agent":          active_agent,
             "linkedin_draft":        state.get("linkedin_draft", {}),
@@ -378,6 +449,7 @@ def human_gate_node(state: AgentState, client=None) -> dict:
                 "human_decision":        "rejected",
                 "awaiting_human":        False,
                 "requires_confirmation": False,
+                "google_requires_confirmation": False,
                 "is_interrupted":         False,
                 "next_node":             "supervisor",
                 "error_message":         "Could not post interrupt buttons to Slack.",
@@ -386,9 +458,33 @@ def human_gate_node(state: AgentState, client=None) -> dict:
         # Normal human confirmation (email/linkedin approval)
         is_linkedin = active_agent == "linkedin_composer" and bool(linkedin_draft)
         is_email    = active_agent == "email_composer" and bool(email_draft)
+        _google_agents = {"calendar_agent", "docs_agent", "sheets_agent"}
+        _google_labels = {
+            "calendar_agent": LABEL["calendar_agent"],
+            "docs_agent":     LABEL["docs_agent"],
+            "sheets_agent":   LABEL["sheets_agent"],
+        }
+        is_google   = active_agent in _google_agents and state.get("google_requires_confirmation", False)
 
         try:
-            if is_linkedin:
+            if is_google:
+                # Show the last result from whichever Google agent ran
+                google_result  = ""
+                agent_label    = _google_labels.get(active_agent, "")
+                for msg in reversed(messages):
+                    if isinstance(msg, HumanMessage):
+                        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                        if agent_label and content.startswith(agent_label):
+                            google_result = content[len(agent_label):].strip()
+                            break
+                blocks = build_google_preview_blocks(google_result or pending_action, thread_ts)
+                client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text="🔵 Google action ready for review.",
+                    blocks=blocks,
+                )
+            elif is_linkedin:
                 blocks = build_linkedin_preview_blocks(linkedin_draft, thread_ts)
                 client.chat_postMessage(
                     channel=channel,
@@ -420,6 +516,7 @@ def human_gate_node(state: AgentState, client=None) -> dict:
                 "human_decision":        "rejected",
                 "awaiting_human":        False,
                 "requires_confirmation": False,
+                "google_requires_confirmation": False,
                 "next_node":             "supervisor",
                 "error_message":         "Could not post confirmation to Slack.",
             }
@@ -479,6 +576,7 @@ def human_gate_node(state: AgentState, client=None) -> dict:
         "human_decision":        decision,
         "awaiting_human":        False,
         "requires_confirmation": False,
+        "google_requires_confirmation": False,
         "pending_confirmation":  "",
         "next_node":             next_node,
         "active_agent":          state.get("active_agent", ""),
@@ -507,7 +605,16 @@ def _resolve_next_node(state: AgentState, decision: str) -> str:
             return "email_send"
         if active_agent == "linkedin_composer":
             return "linkedin_send"
-        return "supervisor"
+        # Google agents - route to supervisor (no separate send node)
+        if active_agent in {"calendar_agent", "docs_agent", "sheets_agent"}:
+            return "supervisor"
+        return "output_formatter"
 
-    # Rejected — always back to supervisor with feedback in decision string
+    # Rejected — if no active_agent (validator escalation), go to output_formatter to end the pipeline
+    if not active_agent:
+        return "output_formatter"
+    
+    # Otherwise, go back to supervisor with feedback
     return "supervisor"
+
+

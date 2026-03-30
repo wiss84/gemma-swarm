@@ -30,6 +30,11 @@ from agents.deep_researcher_agent  import deep_researcher_agent_node, get_deep_r
 from agents.email_composer_agent   import email_composer_node, email_send_node, get_email_composer_agent
 from agents.linkedin_composer_agent import linkedin_composer_node, linkedin_send_node, get_linkedin_composer_agent
 from agents.memory_agent           import memory_agent_node, get_memory_agent
+from agents.docs_agent        import docs_agent_node, get_docs_agent
+from agents.calendar_agent    import calendar_agent_node, get_calendar_agent
+from agents.sheets_agent      import sheets_agent_node, get_sheets_agent
+from agents.gmail_agent       import gmail_agent_node, get_gmail_agent
+
 
 # Nodes
 from nodes.input_router    import input_router_node
@@ -90,6 +95,19 @@ def _validator(state: AgentState) -> dict:
 
 def _output_formatter(state: AgentState) -> dict:
     return output_formatter_node(state)
+
+def _docs_agent(state: AgentState) -> dict:
+    return docs_agent_node(state)
+
+def _calendar_agent(state: AgentState) -> dict:
+    return calendar_agent_node(state)
+
+def _sheets_agent(state: AgentState) -> dict:
+    return sheets_agent_node(state)
+
+def _gmail_agent(state: AgentState) -> dict:
+    return gmail_agent_node(state)
+
 
 # Human gate needs Slack client — injected at runtime
 _slack_client    = None
@@ -156,6 +174,11 @@ def _route_after_supervisor(state: AgentState) -> str:
     if next_node == "email_composer":    return "email_composer"
     if next_node == "linkedin_composer": return "linkedin_composer"
     if next_node == "human_gate":        return "human_gate"
+    if next_node == "docs_agent":       return "docs_agent"
+    if next_node == "calendar_agent":  return "calendar_agent"
+    if next_node == "sheets_agent":    return "sheets_agent"
+    if next_node == "gmail_agent":     return "gmail_agent"
+
     return "validator"
 
 
@@ -193,6 +216,11 @@ def _build_graph() -> StateGraph:
     graph.add_node("human_gate",      _human_gate)
     graph.add_node("validator",        _validator)
     graph.add_node("output_formatter", _output_formatter)
+    graph.add_node("docs_agent",       _docs_agent)
+    graph.add_node("calendar_agent",  _calendar_agent)
+    graph.add_node("sheets_agent",    _sheets_agent)
+    graph.add_node("gmail_agent",     _gmail_agent)
+
 
     # ── Entry Point ────────────────────────────────────────────────────────────
     graph.set_entry_point("input_router")
@@ -256,6 +284,11 @@ def _build_graph() -> StateGraph:
             "linkedin_composer": "linkedin_composer",
             "human_gate":        "human_gate",
             "validator":         "validator",
+            "docs_agent":       "docs_agent",
+            "calendar_agent":  "calendar_agent",
+            "sheets_agent":    "sheets_agent",
+            "gmail_agent":     "gmail_agent",
+
         }
     )
 
@@ -273,6 +306,47 @@ def _build_graph() -> StateGraph:
             "supervisor": "supervisor",
         }
     )
+
+    def _route_after_docs_agent(state: AgentState) -> str:
+        if _should_route_to_human_gate(state):
+            return "human_gate"
+        return "supervisor"
+    
+    graph.add_conditional_edges("docs_agent", _route_after_docs_agent, {
+        "human_gate": "human_gate",
+        "supervisor": "supervisor",
+    })
+
+    def _route_after_calendar_agent(state: AgentState) -> str:
+        if _should_route_to_human_gate(state):
+            return "human_gate"
+        return "supervisor"
+    
+    graph.add_conditional_edges("calendar_agent", _route_after_calendar_agent, {
+        "human_gate": "human_gate",
+        "supervisor": "supervisor",
+    })
+
+    def _route_after_sheets_agent(state: AgentState) -> str:
+        if _should_route_to_human_gate(state):
+            return "human_gate"
+        return "supervisor"
+    
+    graph.add_conditional_edges("sheets_agent", _route_after_sheets_agent, {
+        "human_gate": "human_gate",
+        "supervisor": "supervisor",
+    })
+
+    def _route_after_gmail_agent(state: AgentState) -> str:
+        if _should_route_to_human_gate(state):
+            return "human_gate"
+        return "supervisor"
+    
+    graph.add_conditional_edges("gmail_agent", _route_after_gmail_agent, {
+        "human_gate": "human_gate",
+        "supervisor": "supervisor",
+    })
+
 
     # deep_researcher → supervisor (with interrupt check)
     def _route_after_deep_researcher(state: AgentState) -> str:
@@ -396,6 +470,10 @@ def get_graph():
             get_email_composer_agent(),
             get_linkedin_composer_agent(),
             get_memory_agent(),
+            get_docs_agent(),
+            get_calendar_agent(),
+            get_sheets_agent(),
+            get_gmail_agent(),
         ]:
             _rate_limiters[agent.model_name] = agent.rate_limiter
             # logger.info(f"[graph] Rate limiter registered: {agent.model_name}")

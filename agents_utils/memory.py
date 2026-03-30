@@ -43,13 +43,51 @@ def estimate_messages_tokens(messages: list) -> int:
 # ── Workspace Management ───────────────────────────────────────────────────────
 
 def list_workspaces(workspace_root: str) -> list[str]:
+    """
+    List workspaces sorted by most recently used.
+    Uses thread_registry.json timestamps to sort (newest first).
+    Falls back to alphabetical if no registry entry exists.
+    """
+    import json
+    from agents_utils.config import PROJECT_ROOT
+    
     root = Path(workspace_root)
     if not root.exists():
         return []
-    return [
-        d.name for d in sorted(root.iterdir())
-        if d.is_dir() and not d.name.startswith(".")
-    ]
+    
+    # Get all directories
+    dirs = [d.name for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    if not dirs:
+        return []
+    
+    # Try to load registry for timestamps
+    registry_path = PROJECT_ROOT / "thread_registry.json"
+    registry = {}
+    if registry_path.exists():
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    
+    # Build (project_name, last_used_timestamp) pairs
+    # Use 0 as default for projects not in registry
+    projects_with_time = []
+    for name in dirs:
+        # Find the thread_ts that has this project_name
+        last_used = 0.0
+        for thread_ts, data in registry.items():
+            if data.get("project_name") == name:
+                try:
+                    last_used = float(thread_ts)
+                except ValueError:
+                    pass
+                break  # Use first match (most recent by thread_ts key)
+        projects_with_time.append((name, last_used))
+    
+    # Sort by timestamp descending (newest first)
+    projects_with_time.sort(key=lambda x: x[1], reverse=True)
+    
+    return [name for name, _ in projects_with_time]
 
 
 def create_workspace(workspace_root: str, project_name: str) -> str:

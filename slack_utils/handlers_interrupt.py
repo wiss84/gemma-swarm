@@ -123,7 +123,7 @@ def register_interrupt_handlers(app, run_agent_fn):
             existing = graph.get_state(config)
             messages = existing.values.get("messages", []) if existing.values else []
             # Get previous messages EXCEPT last task (we'll create a new combined task)
-            prev_messages = messages[:-2] if messages else []
+            prev_messages = messages[:-1] if messages else []
             # Get the last human message (the task that was interrupted)
             for msg in reversed(messages):
                 if isinstance(msg, HumanMessage):
@@ -179,7 +179,7 @@ def register_interrupt_handlers(app, run_agent_fn):
             # Build input state with previous messages (excludes old task) + combined message
             # This is like fresh start - we start from beginning with new task
             input_state = {
-                "messages": prev_messages + [HumanMessage(content=f"{combined_msg}")],
+                "messages": prev_messages + [HumanMessage(content=f"{LABEL['human']}\n{combined_msg}")],
                 "slack_thread_ts": thread_ts,
                 "slack_channel": channel,
                 "task_complete": False,
@@ -191,6 +191,18 @@ def register_interrupt_handlers(app, run_agent_fn):
                 "configurable": {"thread_id": new_thread_id},
                 "recursion_limit": 100,
             }
+            
+            # Update the checkpoint's original_task BEFORE streaming
+            # This ensures input_router gets the correct original_task
+            try:
+                graph.update_state(
+                    new_config,
+                    {"original_task": combined_msg},
+                    as_node="input_router",
+                )
+                logger.info(f"[slack] Combine: updated original_task to: {combined_msg[:50]}")
+            except Exception as e:
+                logger.error(f"[slack] Combine: could not update original_task: {e}")
             
             # Post status
             status_ts = ""

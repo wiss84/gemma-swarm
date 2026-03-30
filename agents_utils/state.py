@@ -37,15 +37,23 @@ class AgentState(TypedDict):
     files_modified: list[str]
 
     # ── Memory ─────────────────────────────────────────────────────────────────
-    context_summary:                     str  # supervisor conversation summary
-    researcher_history:                  list  # researcher's own conversation history
-    deep_researcher_history:             list  # deep researcher's own conversation history
-    email_history:                       list  # email composer's own conversation history
-    linkedin_history:                    list  # linkedin composer's own conversation history
+    context_summary:                     str    # supervisor conversation summary
+    researcher_history:                  list   # researcher's own conversation history
+    deep_researcher_history:             list   # deep researcher's own conversation history
+    email_history:                       list   # email composer's own conversation history
+    linkedin_history:                    list   # linkedin composer's own conversation history
+    gmail_history:                       list   # gmail agent's own conversation history
+    calendar_history:                    list   # calendar agent's own conversation history
+    docs_history:                        list   # docs agent's own conversation history
+    sheets_history:                      list   # sheets agent's own conversation history
     researcher_context_summary:          str
     deep_researcher_context_summary:     str
     email_context_summary:               str
     linkedin_context_summary:            str
+    gmail_context_summary:               str
+    calendar_context_summary:            str
+    docs_context_summary:                str
+    sheets_context_summary:              str
 
     # ── Planning ───────────────────────────────────────────────────────────────
     is_complex_task:   bool        # Set by task_classifier
@@ -58,6 +66,10 @@ class AgentState(TypedDict):
     requires_deep_research: bool  # Route to deep_researcher (search + fetch)
     requires_email:         bool
     requires_linkedin:     bool  # Route to email_composer
+    require_gmail:         bool
+    requires_calendar:     bool
+    requires_docs:         bool
+    requires_sheets:       bool
     requires_confirmation:  bool  # Human must approve before continuing
 
     # ── Interrupt Handling ───────────────────────────────────────────────────────
@@ -86,6 +98,14 @@ class AgentState(TypedDict):
     #   "language":       "english",
     #   "feedback":       "",     # populated on reject → recompose cycle
     # }
+
+    # ── Google ─────────────────────────────────────────────────────────────────
+    google_requires_confirmation: bool
+    # True after write actions (calendar_create, calendar_delete,
+    # docs_create, docs_update, sheets_create, sheets_update).
+    # False after read actions — routes straight back to supervisor.
+    # Note: _slack_client is injected at runtime by graph.py node wrappers
+    # and is NOT persisted in state (not serialisable).
 
     # ── Output ─────────────────────────────────────────────────────────────────
     formatted_output: list[str]
@@ -123,6 +143,10 @@ def default_state(
         deep_researcher_history=[],
         email_history=[],
         linkedin_history=[],
+        gmail_history=[],
+        calendar_history=[],
+        docs_history=[],
+        sheets_history=[],
         researcher_context_summary="",
         deep_researcher_context_summary="",
         email_context_summary="",
@@ -134,10 +158,15 @@ def default_state(
         requires_deep_research=False,
         requires_email=False,
         requires_linkedin=False,
+        requires_gmail=False,
+        requires_calendar=False,
+        requires_docs=False,
+        requires_sheets=False,
         requires_confirmation=False,
         is_interrupted=False,
         email_draft={},
         linkedin_draft={},
+        google_requires_confirmation=False,
         formatted_output=[],
         slack_thread_ts=slack_thread_ts,
         slack_channel=slack_channel,

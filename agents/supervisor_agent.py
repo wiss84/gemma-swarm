@@ -156,7 +156,7 @@ def supervisor_agent_node(state: AgentState) -> dict:
     task_complete          = parsed.get("task_complete", False)
     next_node              = parsed.get("next_node", "output_formatter")
 
-    if not original_task and messages:
+    if not original_task:
         last_human = next(
             (m.content for m in reversed(messages) if isinstance(m, HumanMessage)),
             ""
