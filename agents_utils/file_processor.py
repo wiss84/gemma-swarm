@@ -179,6 +179,8 @@ class FileProcessor:
     def _extract_pdf_file(self, file_path: str) -> Dict[str, Any]:
         """Extract content from PDF files"""
         try:
+            import re
+            
             with open(file_path, 'rb') as f:
                 pdf_reader = PyPDF2.PdfReader(f)
                 
@@ -188,6 +190,36 @@ class FileProcessor:
                 for page_num, page in enumerate(pdf_reader.pages, 1):
                     page_text = page.extract_text()
                     if page_text.strip():
+                        # Post-process: join words that were split across lines
+                        # PyPDF2 often returns each word on a new line - need to rejoin them
+                        lines = page_text.split('\n')
+                        cleaned_parts = []
+                        for line in lines:
+                            line = line.strip()
+                            if line:
+                                cleaned_parts.append(line)
+                        
+                        # Join all parts with spaces first
+                        joined = ' '.join(cleaned_parts)
+                        
+                        # Split on sentence endings to reconstruct paragraphs
+                        # Split on: period + space + capital, or question/exclamation + space + capital
+                        parts = re.split(r'([.!?]\s+[A-Z])', joined)
+                        
+                        # Reconstruct text: join each delimiter with the following text
+                        page_text = ""
+                        for i, part in enumerate(parts):
+                            if i % 2 == 0:
+                                # Regular text
+                                page_text += part
+                            else:
+                                # Captured delimiter (punctuation+space+capital) - keep it
+                                page_text += part
+                        
+                        # If reconstruction failed or is empty, use joined version
+                        if not page_text.strip():
+                            page_text = joined
+                        
                         content += f"\n--- Page {page_num} ---\n{page_text}\n"
                 
                 if not content.strip():

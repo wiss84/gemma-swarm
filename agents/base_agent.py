@@ -117,7 +117,7 @@ class BaseAgent(ABC):
         self.tools: list[BaseTool] = []
         self.tool_registry: dict   = {}
 
-        logger.info(f"[{self.agent_name}] Initialized with model {self.model_name}")
+        # logger.info(f"[{self.agent_name}] Initialized with model {self.model_name}")
 
     @abstractmethod
     def get_system_prompt(self) -> str:
@@ -251,10 +251,10 @@ class BaseAgent(ABC):
 
             if parsed and self._is_agent_response(parsed):
                 response_text = parsed.get("response", raw_text)
-                logger.info(f"[{self.agent_name}] Structured response received.")
+                # logger.info(f"[{self.agent_name}] Structured response received.")
                 return response_text, parsed
 
-            logger.info(f"[{self.agent_name}] Plain text response.")
+            # logger.info(f"[{self.agent_name}] Plain text response.")
             return raw_text.strip(), None
 
         logger.warning(f"[{self.agent_name}] Max tool iterations reached.")

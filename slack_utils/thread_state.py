@@ -120,7 +120,7 @@ def load_registry_into_threads():
                     project_name     = data.get("project_name", ""),
                     channel_id       = data.get("channel_id", ""),
                 )
-    logger.info(f"[thread_state] Loaded {len(registry)} thread(s) from registry.")
+    # logger.info(f"[thread_state] Loaded {len(registry)} thread(s) from registry.")
 
 
 def save_thread_workspace(thread_ts: str, workspace_path: str, project_name: str, channel_id: str = None, old_thread_id: str = None):
@@ -148,7 +148,7 @@ def save_thread_workspace(thread_ts: str, workspace_path: str, project_name: str
             logger.warning(f"[thread_state] Could not clean registry: {e}")
     
     _save_registry_entry(thread_ts, workspace_path, project_name, channel_id)
-    logger.info(f"[thread_state] Saved thread {thread_ts} → {project_name} (channel: {channel_id})")
+    # logger.info(f"[thread_state] Saved thread {thread_ts} → {project_name} (channel: {channel_id})")
 
 
 # ── Project Thread Lookup ─────────────────────────────────────────────────────

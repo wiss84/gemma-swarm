@@ -173,7 +173,6 @@ def _route_after_supervisor(state: AgentState) -> str:
     if next_node == "deep_researcher":   return "deep_researcher"
     if next_node == "email_composer":    return "email_composer"
     if next_node == "linkedin_composer": return "linkedin_composer"
-    if next_node == "human_gate":        return "human_gate"
     if next_node == "docs_agent":       return "docs_agent"
     if next_node == "calendar_agent":  return "calendar_agent"
     if next_node == "sheets_agent":    return "sheets_agent"
@@ -478,7 +477,7 @@ def get_graph():
             _rate_limiters[agent.model_name] = agent.rate_limiter
             # logger.info(f"[graph] Rate limiter registered: {agent.model_name}")
 
-        logger.info("[graph] Graph compiled successfully.")
+        # logger.info("[graph] Graph compiled successfully.")
     return _graph
 
 

@@ -166,7 +166,7 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say):
                 if node_name == "output_formatter":
                     formatted_output = node_output.get("formatted_output", [])
 
-                logger.info(f"[slack] Node: {node_name}")
+                # logger.info(f"[slack] Node: {node_name}")
 
     except Exception as e:
         logger.error(f"[slack] Agent error: {e}")
@@ -438,15 +438,15 @@ def main():
 
     logger.info("[slack] Compiling graph...")
     get_graph()
-    logger.info("[slack] Graph ready.")
+    logger.info("[slack] Graph compiled successfully.")
 
     load_registry_into_threads()
-    logger.info("[slack] Thread registry loaded.")
+    # logger.info("[slack] Thread registry loaded.")
 
     try:
         result      = app.client.auth_test()
         BOT_USER_ID = result["user_id"]
-        logger.info(f"[slack] Bot user ID: {BOT_USER_ID}")
+        # logger.info(f"[slack] Bot user ID: {BOT_USER_ID}")
     except Exception as e:
         logger.error(f"[slack] Could not get bot user ID: {e}")
 

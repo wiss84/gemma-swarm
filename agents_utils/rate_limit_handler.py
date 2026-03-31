@@ -201,9 +201,7 @@ class RateLimitHandler:
         else:
             # New calendar day — reset counter
             self._day_request_count = 0
-            logger.info(
-                f"[{self.model_name}] New day detected, counter reset to 0."
-            )
+            # logger.info(f"[{self.model_name}] New day detected, counter reset to 0.")
 
     def _save_state(self):
         data = self._load_all()

@@ -18,7 +18,7 @@ from agents_utils.config import LABEL
 
 logger = logging.getLogger(__name__)
 
-VALID_AGENTS = {"researcher", "deep_researcher", "email_composer", "linkedin_composer"}
+VALID_AGENTS = {"supervisor", "researcher", "deep_researcher", "email_composer", "linkedin_composer", "gmail_agent", "calendar_agent", "docs_agent", "sheets_agent"}
 
 
 class PlannerAgent(BaseAgent):
@@ -98,9 +98,9 @@ def planner_agent_node(state: AgentState) -> dict:
     # Validate and sanitize subtasks
     clean_subtasks = []
     for i, s in enumerate(subtasks):
-        agent_name = s.get("agent", "researcher")
+        agent_name = s.get("agent", "supervisor")
         if agent_name not in VALID_AGENTS:
-            agent_name = "researcher"
+            agent_name = "supervisor"
         clean_subtasks.append({
             "id":          i + 1,
             "description": s.get("description", f"Subtask {i+1}"),

@@ -28,5 +28,6 @@ requests
 Pillow          # For converting images to PNG format
 ffmpeg
 pandas          # For CSV/Excel spreadsheet processing
+openpyxl        # For .xlsx Excel file reading (required by pandas)
 PyPDF2          # For PDF text extraction
 python-docx     # For Word document (.docx) reading
