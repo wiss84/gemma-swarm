@@ -50,7 +50,8 @@ To connect your project to Slack, you need to create a Slack App and get the req
    - `channels:history` 
    - `channels:read` 
    - `chat:write` 
-   - `files:read` 
+   - `files:read`
+   - `groups:read`    
 - User Token Scopes:
   - `files:read`
   - `files:write`
@@ -79,5 +80,15 @@ In your `.env` file in your project root. Add the following variables:
 Bot_User_OAuth_Token=xoxb-your-oauth-token-here
 agent_socket_token=xapp-your-agent-socket-token-here
 ```
+
+---
+
+## 5. Add the app to slack channels from step 1 (e.g. for ai-updates, chating)
+1. Click on any channel to open it.
+2. Click on the channel name on the top → 'Integrations'.
+3. Go to Apps section and click 'Add an App' → 'Add' your app name.
+
+### Important: 
+If you want to use the automated flow for the Autonomous updates. You need to create a channel for updates and add the app to it.
 
 ---

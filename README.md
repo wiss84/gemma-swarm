@@ -22,6 +22,20 @@ Every component in this project was deliberately chosen to avoid paid APIs:
 | **Slack integration** | Slack Bolt — free for personal and small team workspaces |
 | **Conversation memory** | SQLite via LangGraph checkpointing — local file, no cloud |
 
+### Autonomous Mode
+
+A background pipeline that runs scheduled tasks independently from the main chat interface. Configure it via the **Autonomous Settings** button in the workspace menu:
+
+| Job | What it does |
+|-----|--------------|
+| **Email Watch** | Monitors inbox for emails from specific senders, posts alerts to Slack |
+| **Inbox Check** | Scans inbox for new emails and posts summaries |
+| **Calendar Notify** | Checks calendar for upcoming events, sends reminders |
+| **Research + LinkedIn** | Researches configured topics and auto-drafts LinkedIn posts |
+| **Daily Summary** | Posts daily activity summary to the autonomous channel |
+
+Runs on a 60-second tick cycle. All activity is logged to a Google Sheet for tracking.
+
 ---
 
 ## Features

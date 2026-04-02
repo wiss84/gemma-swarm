@@ -46,10 +46,12 @@ from slack_utils.handlers_email     import register_email_handlers
 from slack_utils.handlers_interrupt import register_interrupt_handlers
 from slack_utils.handlers_files     import register_file_handlers
 from slack_utils.handlers_workspace import register_workspace_handlers
+from slack_utils.handlers_autonomous import register_autonomous_handlers
 from slack_utils.handlers_preferences import register_preferences_handlers
 from slack_utils.handlers_google    import register_google_handlers
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("slack_bolt").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -359,6 +361,7 @@ register_linkedin_handlers(app)
 register_email_handlers(app)
 register_interrupt_handlers(app, _run_agent)
 register_file_handlers(app, _run_agent)
+register_autonomous_handlers(app)
 register_workspace_handlers(app, _run_agent)
 register_preferences_handlers(app, _run_agent)
 register_google_handlers(app)
@@ -439,6 +442,7 @@ def main():
     logger.info("[slack] Compiling graph...")
     get_graph()
     logger.info("[slack] Graph compiled successfully.")
+    from autonomous.scheduler import start as start_autonomous_scheduler
 
     load_registry_into_threads()
     # logger.info("[slack] Thread registry loaded.")
@@ -452,6 +456,8 @@ def main():
 
     handler = SocketModeHandler(app, os.environ["agent_socket_token"])
     logger.info("[slack] Gemma Swarm is running ⚡")
+    start_autonomous_scheduler(app.client)
+    logger.info("[slack] Autonomous scheduler started.")
     handler.start()
 
 

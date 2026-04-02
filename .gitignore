@@ -65,6 +65,7 @@ rate_limit_state.json
 user_preferences.json
 Google_creds.json
 google_state.json
+autonomous_settings.json
 
 # Test/Coverage
 .pytest_cache/

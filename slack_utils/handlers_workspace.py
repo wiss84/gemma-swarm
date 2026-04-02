@@ -90,7 +90,13 @@ def build_workspace_blocks(thread_ts: str) -> list:
                 "text":      {"type": "plain_text", "text": "⚙️ Preferences", "emoji": True},
                 "action_id": "global_user_prefs",
                 "value":     thread_ts,
-            }
+            },
+            {
+                "type":      "button",
+                "text":      {"type": "plain_text", "text": "⚡ Autonomous", "emoji": True},
+                "action_id": "open_autonomous_settings",
+                "value":     "open_autonomous_settings",
+            },
         ],
     })
 
