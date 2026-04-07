@@ -32,6 +32,6 @@ openpyxl        # For .xlsx Excel file reading (required by pandas)
 PyPDF2          # For PDF text extraction
 python-docx     # For Word document (.docx) reading
 beautifulsoup4  # For Web scraping
-lxml            # For Excel spreadsheet processing
+lxml            # For Excel spreadsheet processing and Web scraping
 playwright      # For Web scraping (JS-heavy pages)
 trafilatura     # For advanced web page content extraction (main content detection)

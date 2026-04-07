@@ -49,8 +49,8 @@ Or continue an existing project:
 │ Select a project        ▼  │  ← dropdown menu
 └─────────────────────────────┘
 
-Or update your preferences:
-[ ⚙️ Preferences ]
+Or update your preferences and setup background Autonomous tasks:
+[ ⚙️ Preferences ]   [ ⚡ Autonomous ]
 ```
 
 ### Selecting from the Dropdown

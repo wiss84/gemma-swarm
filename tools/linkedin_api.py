@@ -32,6 +32,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from datetime import datetime, date
 from typing import Optional
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,98 @@ _state_lock          = threading.Lock()
 _urn_cache: str      = ""
 _oauth_code_event    = threading.Event()
 _oauth_code_received = ""
+_api_version_cache   = None
+
+
+# ── LinkedIn Version Fetcher ───────────────────────────────────────────────────
+
+def _fetch_latest_linkedin_version() -> Optional[str]:
+    """Fetch the latest LinkedIn API header version from their versioning page."""
+    url = "https://learn.microsoft.com/en-us/linkedin/talent/versioning?"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning(f"[linkedin] Failed to fetch latest version: {e}")
+        return None
+
+    try:
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Find the "Latest Version" header
+        header = None
+        for h in soup.find_all(["h2", "h3"]):
+            if "Latest Version" in h.text:
+                header = h
+                break
+
+        if not header:
+            logger.warning("[linkedin] Could not find 'Latest Version' section")
+            return None
+
+        # Find the next table after header
+        table = header.find_next("table")
+        if not table:
+            logger.warning("[linkedin] No table found under 'Latest Version'")
+            return None
+
+        # Extract rows
+        rows = table.find_all("tr")
+        if len(rows) < 2:
+            logger.warning("[linkedin] Table format unexpected (no data rows)")
+            return None
+
+        # Extract Version Header (second column, first data row)
+        first_data_row = rows[1].find_all("td")
+        if len(first_data_row) < 2:
+            logger.warning("[linkedin] Row format unexpected (missing columns)")
+            return None
+
+        version_header = first_data_row[1].text.strip()
+        logger.info(f"[linkedin] Fetched latest version: {version_header}")
+        return version_header
+
+    except Exception as e:
+        logger.warning(f"[linkedin] Error parsing version page: {e}")
+        return None
+
+
+# ── API Version Management ────────────────────────────────────────────────────
+
+def get_api_version() -> str:
+    """
+    Get the current LinkedIn API version from state, or fallback to hardcoded version.
+    This should only be called for read operations; write operations handle version
+    updates via try-except and update_api_version().
+    """
+    global _api_version_cache
+    
+    if _api_version_cache:
+        return _api_version_cache
+    
+    # Try to load from state
+    state = _load_state()
+    stored_version = state.get("linkedin_api_version", "")
+    
+    if stored_version:
+        _api_version_cache = stored_version
+        return stored_version
+    
+    # Fallback to hardcoded version
+    return "202510"
+
+
+def update_api_version(new_version: str):
+    """Update the stored API version in state file."""
+    global _api_version_cache
+    _api_version_cache = new_version
+    
+    with _state_lock:
+        state = _load_state()
+        state["linkedin_api_version"] = new_version
+        _save_state(state)
+    
+    logger.info(f"[linkedin] Updated API version to: {new_version}")
 
 
 # ── State File ─────────────────────────────────────────────────────────────────
@@ -403,7 +496,7 @@ def prepare_media(file_path: str) -> tuple[Path, str]:
 def _get_headers(token: str, content_type: bool = True) -> dict:
     headers = {
         "Authorization":             f"Bearer {token}",
-        "LinkedIn-Version":          API_VERSION,
+        "LinkedIn-Version":          get_api_version(),
         "X-Restli-Protocol-Version": "2.0.0",
     }
     if content_type:
@@ -417,20 +510,49 @@ def get_person_urn(slack_post_fn=None) -> str:
     if _urn_cache:
         return _urn_cache
 
-    token    = _get_access_token(slack_post_fn)
-    response = requests.get(
-        "https://api.linkedin.com/v2/userinfo",
-        headers={
-            "Authorization":    f"Bearer {token}",
-            "LinkedIn-Version": API_VERSION,
-        },
-        timeout=10,
-    )
-    response.raise_for_status()
-    user_id    = response.json()["sub"]
-    _urn_cache = f"urn:li:person:{user_id}"
-    logger.info(f"[linkedin] Person URN cached: {_urn_cache}")
-    return _urn_cache
+    token = _get_access_token(slack_post_fn)
+    
+    # Try with current version first
+    try:
+        response = requests.get(
+            "https://api.linkedin.com/v2/userinfo",
+            headers={
+                "Authorization":    f"Bearer {token}",
+                "LinkedIn-Version": get_api_version(),
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        user_id    = response.json()["sub"]
+        _urn_cache = f"urn:li:person:{user_id}"
+        logger.info(f"[linkedin] Person URN cached: {_urn_cache}")
+        return _urn_cache
+    
+    except requests.RequestException as e:
+        logger.warning(f"[linkedin] API call failed with current version: {e}")
+        # Try to fetch and update to latest version
+        new_version = _fetch_latest_linkedin_version()
+        if new_version:
+            update_api_version(new_version)
+            try:
+                response = requests.get(
+                    "https://api.linkedin.com/v2/userinfo",
+                    headers={
+                        "Authorization":    f"Bearer {token}",
+                        "LinkedIn-Version": new_version,
+                    },
+                    timeout=10,
+                )
+                response.raise_for_status()
+                user_id    = response.json()["sub"]
+                _urn_cache = f"urn:li:person:{user_id}"
+                logger.info(f"[linkedin] Person URN cached with new version: {_urn_cache}")
+                return _urn_cache
+            except Exception as retry_error:
+                logger.error(f"[linkedin] Retry with new version failed: {retry_error}")
+                raise LinkedInAuthError(f"Failed to fetch person URN: {retry_error}")
+        else:
+            raise LinkedInAuthError(f"Failed to fetch person URN and could not update version: {e}")
 
 
 def _register_upload(owner_urn: str, media_type: str, token: str) -> tuple[str, str]:

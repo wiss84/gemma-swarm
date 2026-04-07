@@ -4,10 +4,15 @@ Gemma Swarm — Web Search Tools
 Three tools for agentic search:
 
 1. search_web(query)        — Returns titles, URLs, snippets. No LLM.
-2. fetch_page(url)          — Fetches full page via Jina, returns chunk 1. 
+2. fetch_page(url)          — Fetches full page via FREE fetcher (primary) or Jina (fallback), returns chunk 1. 
 3. fetch_next_chunk(url)    — Returns next chunk for a previously fetched URL.
 
-Large pages are split into 12,000 char chunks. The researcher reads them
+Fetching Strategy:
+- PRIMARY: Advanced free fetcher (trafilatura + BeautifulSoup, caching, retry logic)
+- FALLBACK: Jina Reader API (when free fetcher fails)
+- BENEFIT: Highly sustainable, no token limits on primary fetcher
+
+Large pages are split into 10,000 char chunks. The researcher reads them
 sequentially by calling fetch_next_chunk until all chunks are read.
 No LLM is involved in chunking — content is never altered or summarized.
 """
@@ -18,6 +23,7 @@ import logging
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
 from dotenv import load_dotenv
+from agents_utils.web_fetcher import fetch_page_free
 
 load_dotenv()
 
@@ -69,7 +75,25 @@ def _ddg_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> list[dict]
 
 
 def _fetch_raw_page(url: str) -> str:
-    """Fetch page content via Jina Reader. Returns clean markdown."""
+    """
+    Fetch page content. Uses free fetcher as primary, falls back to Jina.
+    Returns clean markdown text.
+    """
+    # PRIMARY: Try free web fetcher first
+    logger.info(f"[fetch_page] Trying free fetcher for: {url}")
+    try:
+        content = fetch_page_free(url, force_refresh=False)
+        # Check if it's an error message
+        if not content.startswith("["):
+            logger.info(f"[fetch_page] Free fetcher succeeded ({len(content)} chars)")
+            return content
+        else:
+            logger.warning(f"[fetch_page] Free fetcher returned error: {content}")
+    except Exception as e:
+        logger.warning(f"[fetch_page] Free fetcher failed: {e}")
+
+    # FALLBACK: Use Jina if free fetcher failed
+    logger.info(f"[fetch_page] Falling back to Jina for: {url}")
     jina_url = f"{JINA_READER_URL}{url}"
     headers  = {"Accept": "text/plain"}
 
@@ -86,14 +110,18 @@ def _fetch_raw_page(url: str) -> str:
         )
         response.raise_for_status()
         content = response.text.strip()
-        return content if content else "[No content returned]"
+        logger.info(f"[fetch_page] Jina fallback succeeded ({len(content)} chars)")
+        return content if content else "[Jina: No content returned]"
 
     except httpx.TimeoutException:
-        return f"[Timeout fetching {url}]"
+        logger.error(f"[fetch_page] Jina timeout for {url}")
+        return f"[Jina: Timeout fetching {url}]"
     except httpx.HTTPStatusError as e:
-        return f"[HTTP {e.response.status_code} for {url}]"
+        logger.error(f"[fetch_page] Jina HTTP {e.response.status_code} for {url}")
+        return f"[Jina: HTTP {e.response.status_code} for {url}]"
     except httpx.RequestError as e:
-        return f"[Request error: {e}]"
+        logger.error(f"[fetch_page] Jina request error: {e}")
+        return f"[Jina: Request error: {e}]"
 
 
 def _split_into_chunks(content: str) -> list[str]:
