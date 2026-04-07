@@ -27,7 +27,11 @@ requests
 # ── File processing ─────────────────────────────────────────────────────────
 Pillow          # For converting images to PNG format
 ffmpeg
-pandas          # For CSV/Excel spreadsheet processing
+pandas          # For CSV processing
 openpyxl        # For .xlsx Excel file reading (required by pandas)
 PyPDF2          # For PDF text extraction
 python-docx     # For Word document (.docx) reading
+beautifulsoup4  # For Web scraping
+lxml            # For Excel spreadsheet processing
+playwright      # For Web scraping (JS-heavy pages)
+trafilatura     # For advanced web page content extraction (main content detection)

@@ -107,10 +107,10 @@ def _execute_action(action: str, params: dict, state: AgentState, slack_post_fn)
                 slack_post_fn=slack_post_fn,
             )
             result = (
-                f"📅 *Calendar event ready for confirmation:*\n"
+                f"📅 *Calendar event created successfully:*\n"
                 f"*{event['title']}*\n"
                 f"📅 {event['start']} → {event['end']}\n"
-                f"🔗 <{event['link']}|Open in Calendar>"
+                f"🔗 Open in Calendar: <{event['link']}>"
             )
             return True, result
 

@@ -43,8 +43,9 @@ DEFAULT_SETTINGS = {
 
     "calendar_notify": {
         "enabled":              True,
-        "minutes_before":       30,
-        "last_checked_date":    None
+        "notify_offsets":       [30],
+        "last_checked_date":    None,
+        "pending_notifications": []
     },
 }
 

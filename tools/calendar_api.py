@@ -3,14 +3,18 @@ Gemma Swarm — Calendar API
 ==========================
 Google Calendar API functions for listing, creating, and deleting events.
 Uses OAuth helpers from google_api.py.
+
+Timezone handling:
+- calendar_create_event always uses the user's real timezone from Google Calendar settings.
+- The timezone is fetched once and cached in google_state.json.
+- The agent prompt tells the agent NOT to pass a timezone — we handle it here automatically.
 """
 
 import logging
 import requests
 from datetime import datetime
 
-# Import shared auth helpers from google_api
-from tools.google_api import _get_access_token, _auth_headers
+from tools.google_api import _get_access_token, _auth_headers, get_user_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +70,6 @@ def calendar_list_events(
 
 
 def calendar_get_next_event(slack_post_fn=None) -> dict | None:
-    """
-    Get the next upcoming calendar event.
-    """
     events = calendar_list_events(max_results=1, slack_post_fn=slack_post_fn)
     return events[0] if events else None
 
@@ -79,25 +80,30 @@ def calendar_create_event(
     end_datetime: str,
     description: str = "",
     location: str = "",
-    timezone: str = "UTC",
+    timezone: str = None,
     slack_post_fn=None,
 ) -> dict:
     """
-    Create a new calendar event.
-    title: Event title
-    start_datetime: ISO 8601 format e.g. "2026-03-25T14:00:00"
-    end_datetime: ISO 8601 format e.g. "2026-03-25T15:00:00"
-    description: Event description (optional)
-    location: Event location (optional)
-    timezone: Timezone (default: UTC)
+    Create a new calendar event using the user's real timezone.
+
+    timezone parameter is IGNORED — we always use the user's actual Google Calendar
+    timezone fetched from their account settings. This prevents the UTC offset bug
+    where events appear shifted when the user is not in UTC.
+
+    start_datetime / end_datetime: ISO 8601 without Z suffix e.g. "2026-03-25T15:00:00"
+    These are treated as local time in the user's timezone.
     """
-    token   = _get_access_token(slack_post_fn)
+    token        = _get_access_token(slack_post_fn)
+    user_tz      = get_user_timezone()
+
+    logger.info(f"[google/calendar] Creating event '{title}' in timezone: {user_tz}")
+
     payload = {
         "summary":     title,
         "description": description,
         "location":    location,
-        "start": {"dateTime": start_datetime, "timeZone": timezone},
-        "end":   {"dateTime": end_datetime,   "timeZone": timezone},
+        "start": {"dateTime": start_datetime, "timeZone": user_tz},
+        "end":   {"dateTime": end_datetime,   "timeZone": user_tz},
     }
     response = requests.post(
         "https://www.googleapis.com/calendar/v3/calendars/primary/events",
@@ -107,21 +113,18 @@ def calendar_create_event(
     )
     response.raise_for_status()
     event = response.json()
-    logger.info(f"[google/calendar] Event created: {title}")
+    logger.info(f"[google/calendar] Event created: {title} (tz: {user_tz})")
     return {
-        "id":    event.get("id", ""),
-        "title": event.get("summary", ""),
-        "start": event.get("start", {}).get("dateTime", ""),
-        "end":   event.get("end", {}).get("dateTime", ""),
-        "link":  event.get("htmlLink", ""),
+        "id":       event.get("id", ""),
+        "title":    event.get("summary", ""),
+        "start":    event.get("start", {}).get("dateTime", ""),
+        "end":      event.get("end", {}).get("dateTime", ""),
+        "link":     event.get("htmlLink", ""),
+        "timezone": user_tz,
     }
 
 
 def calendar_delete_event(event_id: str, slack_post_fn=None) -> bool:
-    """
-    Delete a calendar event by ID.
-    Returns True if deleted successfully.
-    """
     token    = _get_access_token(slack_post_fn)
     response = requests.delete(
         f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",

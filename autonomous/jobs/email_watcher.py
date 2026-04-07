@@ -8,8 +8,31 @@ Zero LLM calls.
 """
 
 import logging
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 logger = logging.getLogger(__name__)
+
+
+def _format_email_date(raw_date: str) -> str:
+    """
+    Parse a raw RFC 2822 email Date header and return a clean local-time string.
+    Example input:  "Mon, 07 Apr 2026 12:20:00 +0000"
+    Example output: "Mon, Apr 07 2026 02:20 PM (Europe/Warsaw)"
+    Falls back to the raw string if parsing fails.
+    """
+    if not raw_date:
+        return ""
+    try:
+        import zoneinfo
+        from tools.google_api import get_user_timezone
+
+        dt      = parsedate_to_datetime(raw_date)          # always tz-aware
+        user_tz = get_user_timezone()                       # e.g. "Europe/Warsaw"
+        local   = dt.astimezone(zoneinfo.ZoneInfo(user_tz))
+        return local.strftime("%a, %b %d %Y %I:%M %p") + f" ({user_tz})"
+    except Exception:
+        return raw_date  # safe fallback — always show something
 
 
 def run(slack_client, autonomous_channel_id: str):
@@ -59,8 +82,8 @@ def run(slack_client, autonomous_channel_id: str):
                 continue
 
             # Filter out already-seen message IDs
-            prev_seen  = set(last_seen_ids.get(sender, []))
-            new_msgs   = [m for m in messages if m["id"] not in prev_seen]
+            prev_seen = set(last_seen_ids.get(sender, []))
+            new_msgs  = [m for m in messages if m["id"] not in prev_seen]
 
             if not new_msgs:
                 logger.info(f"[email_watcher] No NEW emails from {sender} (already seen)")
@@ -81,14 +104,16 @@ def run(slack_client, autonomous_channel_id: str):
                     for h in data.get("payload", {}).get("headers", [])
                 }
 
-                subject = headers.get("subject", "(no subject)")
-                date    = headers.get("date", "")
+                subject    = headers.get("subject", "(no subject)")
+                raw_date   = headers.get("date", "")
+                # Convert the raw RFC 2822 date to the user's local timezone
+                local_date = _format_email_date(raw_date)
 
                 # Post Slack notification
                 notify_text = (
                     f"📬 *New email from {sender}*\n"
                     f"*Subject:* {subject}\n"
-                    f"*Date:* {date}"
+                    f"*Date:* {local_date}"
                 )
                 try:
                     slack_client.chat_postMessage(

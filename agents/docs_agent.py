@@ -71,9 +71,9 @@ def _execute_action(action: str, params: dict, state: AgentState, slack_post_fn)
                 slack_post_fn=slack_post_fn,
             )
             result = (
-                f"📄 *Google Doc ready for confirmation:*\n"
+                f"📄 *Google Doc Created Successfully:*\n"
                 f"*{doc['title']}*\n"
-                f"🔗 <{doc['link']}|Open in Google Docs>"
+                f"🔗 Open in Google Docs: <{doc['link']}>"
             )
             return True, result
 
@@ -82,9 +82,9 @@ def _execute_action(action: str, params: dict, state: AgentState, slack_post_fn)
             doc    = docs_read(doc_id, slack_post_fn=slack_post_fn)
             result = (
                 f"📄 *{doc['title']}*\n\n"
-                f"{doc['content'][:3000]}"
-                + ("\n\n_(content truncated)_" if len(doc["content"]) > 3000 else "")
-                + f"\n\n🔗 <{doc['link']}|Open in Google Docs>"
+                f"{doc['content'][:5000]}"
+                + ("\n\n_(content truncated)_" if len(doc["content"]) > 5000 else "")
+                + f"\n\n🔗 Open in Google Docs: <{doc['link']}>"
             )
             return True, result
 
@@ -96,8 +96,8 @@ def _execute_action(action: str, params: dict, state: AgentState, slack_post_fn)
                 slack_post_fn=slack_post_fn,
             )
             result = (
-                f"📄 *Google Doc updated and ready for confirmation:*\n"
-                f"🔗 <{doc['link']}|Open in Google Docs>"
+                f"📄 *Google Doc updated Successfully:*\n"
+                f"🔗 Open in Google Docs: <{doc['link']}>"
             )
             return True, result
 

@@ -7,8 +7,16 @@ def get_prompt() -> str:
     now  = datetime.now()
     date = now.strftime("%B %d, %Y")
     time = now.strftime("%H:%M")
+
+    # Load user timezone for context — agent needs to know local time for calculations
+    try:
+        from tools.google_api import get_user_timezone
+        user_tz = get_user_timezone()
+    except Exception:
+        user_tz = "UTC"
+
     return f"""{LABEL['system']}
-Today is {date}. Current time is {time}.
+Today is {date}. Current local time is {time} ({user_tz}).
 You are a Calendar Agent. You work under the supervision of a Supervisor Agent.
 Your only job is to read the task, pick the correct action, and return the correct params.
 
@@ -45,16 +53,16 @@ calendar_create
     "start_datetime": "2026-03-25T15:00:00",
     "end_datetime":   "2026-03-25T16:00:00",
     "description":    "optional notes",
-    "location":       "optional location",
-    "timezone":       "UTC"
+    "location":       "optional physical location of the meeting e.g. Office Room 3"
   }}
   Use when: user wants to create or schedule a new calendar event.
-  - start_datetime and end_datetime: ISO 8601 WITHOUT Z suffix.
+  - start_datetime and end_datetime: ISO 8601 WITHOUT Z suffix, in LOCAL time ({user_tz}).
   - If end time not specified: default to 1 hour after start.
-  - If timezone not specified: use UTC.
+  - DO NOT include a timezone param — timezone is handled automatically by the system.
   DATE CALCULATION using today ({date}) and current time ({time}):
   - "tomorrow at 3pm" → start: tomorrow's date + T15:00:00, end: tomorrow's date + T16:00:00
   - "next Monday at 10am for 2 hours" → next Monday's date, T10:00:00 to T12:00:00
+  - "at 6:30pm" means T18:30:00 in local time
 
 calendar_delete
   params: {{ "event_id": "google_calendar_event_id" }}
@@ -67,4 +75,5 @@ calendar_delete
 IMPORTANT:
 - Respond ONLY with the JSON block. No extra text before or after.
 - Never invent event IDs — only use IDs from your conversation history.
-- Never invent datetime values — always calculate from today ({date}) and time ({time})."""
+- Never invent datetime values — always calculate from today ({date}) and time ({time}).
+- Times are always LOCAL time ({user_tz}) — do NOT convert to UTC."""

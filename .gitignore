@@ -66,6 +66,7 @@ user_preferences.json
 Google_creds.json
 google_state.json
 autonomous_settings.json
+research_history.json
 
 # Test/Coverage
 .pytest_cache/

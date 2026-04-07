@@ -71,9 +71,9 @@ def _execute_action(action: str, params: dict, state: AgentState, slack_post_fn)
                 slack_post_fn=slack_post_fn,
             )
             result = (
-                f"📊 *Google Sheet ready for confirmation:*\n"
+                f"📊 *Google Sheet Created Successfully:*\n"
                 f"*{sheet['title']}*\n"
-                f"🔗 <{sheet['link']}|Open in Google Sheets>"
+                f"🔗 Open in Google Sheets: <{sheet['link']}>"
             )
             return True, result
 
@@ -94,7 +94,7 @@ def _execute_action(action: str, params: dict, state: AgentState, slack_post_fn)
             result = (
                 f"📊 *{sheet['title']}*\n\n"
                 f"{rows_text}\n\n"
-                f"🔗 <{sheet['link']}|Open in Google Sheets>"
+                f"🔗 Open in Google Sheets: <{sheet['link']}>"
             )
             return True, result
 
@@ -107,8 +107,8 @@ def _execute_action(action: str, params: dict, state: AgentState, slack_post_fn)
                 slack_post_fn=slack_post_fn,
             )
             result = (
-                f"📊 *Google Sheet updated and ready for confirmation:*\n"
-                f"🔗 <{updated['link']}|Open in Google Sheets>"
+                f"📊 *Google Sheet updated Successfully:*\n"
+                f"🔗 Open in Google Sheets: <{updated['link']}>"
             )
             return True, result
 

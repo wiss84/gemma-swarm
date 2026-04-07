@@ -14,7 +14,8 @@ google_state.json structure:
     "access_token":        "...",
     "refresh_token":       "...",
     "token_expiry":        "2026-03-25T16:00:00",
-    "token_issued_date":   "2026-03-25"
+    "token_issued_date":   "2026-03-25",
+    "user_timezone":       "Europe/Warsaw"   ← fetched from Google Calendar settings
 }
 """
 
@@ -278,6 +279,19 @@ def complete_oauth_flow(slack_post_fn=None) -> bool:
         _save_state(state)
 
     logger.info("[google] OAuth complete. Tokens saved.")
+
+    # Immediately fetch and store user timezone after successful auth
+    try:
+        tz = _fetch_calendar_timezone()
+        if tz:
+            with _state_lock:
+                state = _load_state()
+                state["user_timezone"] = tz
+                _save_state(state)
+            logger.info(f"[google] User timezone detected: {tz}")
+    except Exception as e:
+        logger.warning(f"[google] Could not fetch timezone: {e}")
+
     if slack_post_fn:
         slack_post_fn(
             "✅ Google authorization successful! "
@@ -316,6 +330,55 @@ def _get_access_token(slack_post_fn=None) -> str:
 
 def _auth_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+# ── User Timezone ──────────────────────────────────────────────────────────────
+
+def _fetch_calendar_timezone() -> str | None:
+    """
+    Fetch the user's timezone from their Google Calendar settings.
+    Returns an IANA timezone string e.g. "Europe/Warsaw", "America/New_York".
+    This is the timezone the user has set in their Google Calendar account.
+    """
+    try:
+        token    = _get_access_token()
+        response = requests.get(
+            "https://www.googleapis.com/calendar/v3/users/me/settings/timezone",
+            headers=_auth_headers(token),
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json().get("value", None)
+    except Exception as e:
+        logger.warning(f"[google] Could not fetch calendar timezone: {e}")
+        return None
+
+
+def get_user_timezone() -> str:
+    """
+    Get the user's timezone. Returns cached value from google_state.json if available.
+    Falls back to fetching from Google Calendar API. Falls back to UTC if all else fails.
+
+    This is the primary function to call whenever you need the user's timezone.
+    """
+    # Check cache first
+    state = _load_state()
+    cached = state.get("user_timezone", "")
+    if cached:
+        return cached
+
+    # Not cached — fetch from Google Calendar
+    tz = _fetch_calendar_timezone()
+    if tz:
+        with _state_lock:
+            state = _load_state()
+            state["user_timezone"] = tz
+            _save_state(state)
+        logger.info(f"[google] User timezone fetched and cached: {tz}")
+        return tz
+
+    logger.warning("[google] Could not determine user timezone — defaulting to UTC.")
+    return "UTC"
 
 
 # ── Plain Text Body Extractor ──────────────────────────────────────────────────

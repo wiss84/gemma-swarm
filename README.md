@@ -38,6 +38,12 @@ Runs on a 60-second tick cycle. All activity is logged to a Google Sheet for tra
 
 ---
 
+Watch a quick demo to show case Email sending with feedback and interruptions: https://youtu.be/LfiQYaT1l9Q
+
+Watch a quick demo to show case Autonomous Mode in action: https://youtu.be/u5iaSv6Hi2U
+
+---
+
 ## Features
 
 - 🤖 **Multi-Agent Orchestration** — Supervisor, Planner, Researcher, Deep Researcher, Email Composer, LinkedIn Composer, Memory Agent, Task Classifier
