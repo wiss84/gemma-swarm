@@ -32,7 +32,12 @@ DEFAULT_SETTINGS = {
     "email_watch": {
         "senders":              [],
         "poll_interval_minutes": 15,
-        "last_seen_ids":        {}
+        "last_seen_ids":        {},
+        # If enabled, the agent reads new email bodies, classifies importance,
+        # and drafts replies for action-required emails (recruiters, meeting
+        # requests, professional enquiries). Users should be aware that email
+        # content is passed to the LLM to enable this feature.
+        "reply_drafts_enabled": False,
     },
 
     "research": {
@@ -44,6 +49,11 @@ DEFAULT_SETTINGS = {
     "calendar_notify": {
         "enabled":              True,
         "notify_offsets":       [30],
+        # Speak alerts aloud on the machine running the backend (Windows/macOS/Linux)
+        "voice_alerts":         False,
+        # Use LLM to generate a natural-sounding spoken phrase instead of the
+        # hardcoded template. Adds ~1 LLM call per fired notification.
+        "voice_llm":            False,
         "last_checked_date":    None,
         "pending_notifications": []
     },

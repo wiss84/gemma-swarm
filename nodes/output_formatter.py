@@ -10,6 +10,7 @@ Responsibilities:
 - Keep code blocks intact
 - Split long responses into Slack-safe chunks
 - Clean up internal labels before sending to user
+- Guard against empty responses that would cause Slack API errors
 """
 
 import re
@@ -34,16 +35,13 @@ def _markdown_to_slack(text: str) -> str:
     Convert markdown formatting to Slack mrkdwn.
     Skips content inside code blocks — those stay untouched.
     """
-    # Split into code blocks and regular text
-    # We process regular text only, leaving code blocks intact
     code_block_pattern = r"(```[\s\S]*?```|`[^`]+`)"
     parts = re.split(code_block_pattern, text)
 
     result = []
     for i, part in enumerate(parts):
-        # Even indices are regular text, odd indices are code blocks
         if i % 2 == 1:
-            result.append(part)  # Code block — leave untouched
+            result.append(part)
             continue
 
         # --- Headings: # Heading → *Heading*
@@ -67,8 +65,6 @@ def _markdown_to_slack(text: str) -> str:
 
         # --- Horizontal rules: --- or *** → blank line
         part = re.sub(r"^[-\*]{3,}$", "", part, flags=re.MULTILINE)
-
-        # --- Links handled by _normalize_links() after the loop
 
         # --- Blockquotes: > text → ▎ text
         part = re.sub(r"^>\s+(.+)$", r"▎ \1", part, flags=re.MULTILINE)
@@ -122,7 +118,6 @@ def _normalize_links(text: str) -> str:
     return text
 
 
-
 def _split_message(text: str, max_chars: int = SLACK_SAFE_CHARS) -> list[str]:
     """
     Split a long message into chunks, keeping code blocks intact.
@@ -132,12 +127,10 @@ def _split_message(text: str, max_chars: int = SLACK_SAFE_CHARS) -> list[str]:
         return [text]
 
     chunks  = []
-    # Split on code blocks — keep them intact
     parts   = re.split(r"(```[\s\S]*?```)", text)
     current = ""
 
     for part in parts:
-        # Large code block alone — hard split if needed
         if len(part) > max_chars:
             if current:
                 chunks.append(current.strip())
@@ -149,7 +142,6 @@ def _split_message(text: str, max_chars: int = SLACK_SAFE_CHARS) -> list[str]:
             continue
 
         if len(current) + len(part) > max_chars:
-            # Try to split current at a paragraph break
             split_pos = current.rfind("\n\n")
             if split_pos > max_chars // 2:
                 chunks.append(current[:split_pos].strip())
@@ -167,10 +159,18 @@ def _split_message(text: str, max_chars: int = SLACK_SAFE_CHARS) -> list[str]:
 
 
 def _get_final_response(state: AgentState) -> str:
-    """Extract the final response to send to the user."""
-    messages = state.get("messages", [])
+    """
+    Extract the final response to send to the user.
 
+    Looks for the most recent supervisor message with a non-empty response.
+    If the supervisor response is empty (MODE A was used when MODE B was needed,
+    e.g. creative writing put in current_subtask instead of response), logs a
+    warning and returns a fallback error message rather than an empty string
+    that would cause Slack's 'no_text' API error.
+    """
     from langchain_core.messages import HumanMessage
+
+    messages = state.get("messages", [])
 
     for msg in reversed(messages):
         if not isinstance(msg, HumanMessage):
@@ -179,10 +179,21 @@ def _get_final_response(state: AgentState) -> str:
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
 
         if content.startswith(LABEL["supervisor"]):
-            return content.replace(LABEL["supervisor"], "").strip()
+            text = content.replace(LABEL["supervisor"], "").strip()
+            if text:
+                return text
+            # Supervisor response was empty — log and fall through to error
+            logger.warning(
+                "[output_formatter] Supervisor produced an empty response. "
+                "This usually means MODE A was used for a task that needed MODE B "
+                "(e.g. creative writing placed in current_subtask instead of response)."
+            )
+            break
 
         if content.startswith(LABEL["system"]):
-            return content.replace(LABEL["system"], "").strip()
+            text = content.replace(LABEL["system"], "").strip()
+            if text:
+                return text
 
     error = state.get("error_message", "")
     if error:

@@ -23,7 +23,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.tools import BaseTool
 from agents_utils.config import MODELS, LABEL, MAX_TOOL_ITERATIONS
-from agents_utils.rate_limit_handler import RateLimitHandler, get_gemini_fallback_status
+from agents_utils.rate_limit_handler import RateLimitHandler
 from agents_utils.json_parser import _extract_json
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ AGENT_HISTORY_FIELD = {
 def _filter_messages_for_agent(agent_name: str, messages: list, state: dict = None) -> list:
     """
     Return the correct message list for each agent type.
-    
+
     - supervisor: full shared messages list
     - planner/classifier: only latest human message
     - researcher/email/linkedin/deep_researcher: their own independent history
@@ -92,20 +92,9 @@ def _filter_messages_for_agent(agent_name: str, messages: list, state: dict = No
 class BaseAgent(ABC):
 
     def __init__(self, agent_name: str):
-        self.agent_name   = agent_name
-        self.model_name   = MODELS[agent_name]
-        self.fallback_used = False  # Track if this specific agent had to fallback
-        
-        # Check if Gemini fallback was already triggered (due to daily limit exhaustion)
-        fallback_status = get_gemini_fallback_status()
-        if fallback_status["fallback_used"] and self.model_name.startswith("gemini-"):
-            self.model_name = "gemma-3-27b-it"
-            self.fallback_used = True
-            logger.warning(
-                f"[{self.agent_name}] Using fallback model {self.model_name} "
-                f"(Gemini daily limit exhausted)"
-            )
-        
+        self.agent_name = agent_name
+        self.model_name = MODELS[agent_name]
+
         self.rate_limiter = RateLimitHandler(model_name=self.model_name)
 
         self.llm = ChatGoogleGenerativeAI(
@@ -117,7 +106,7 @@ class BaseAgent(ABC):
         self.tools: list[BaseTool] = []
         self.tool_registry: dict   = {}
 
-        # logger.info(f"[{self.agent_name}] Initialized with model {self.model_name}")
+        logger.info(f"[{self.agent_name}] Initialized: {self.model_name}")
 
     @abstractmethod
     def get_system_prompt(self) -> str:
@@ -161,23 +150,44 @@ class BaseAgent(ABC):
     def _extract_response_content(self, response) -> str:
         """
         Extract text content from LLM response.
-        Handles both Gemini (list structure) and Gemma (string structure).
+
+        Handles three response structures:
+        - str: plain Gemma 3 response
+        - list with mixed blocks: Gemma 4 thinking mode response.
+          Blocks have a 'type' field — we skip 'thinking' blocks and
+          concatenate all 'text' blocks.
+        - list with dict blocks (no 'type'): older Gemini-style content blocks
+          with a 'text' key directly.
         """
-        if isinstance(response.content, str):
-            # Gemma models: content is directly a string
-            return response.content
-        elif isinstance(response.content, list) and len(response.content) > 0:
-            # Gemini models: content is a list of content blocks
-            # Extract text from first block
-            first_block = response.content[0]
-            if isinstance(first_block, dict) and 'text' in first_block:
-                return first_block['text']
-            else:
-                # Fallback: try to convert to string
-                return str(response.content)
-        else:
-            # Fallback for any other structure
-            return str(response.content)
+        content = response.content
+
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list) and len(content) > 0:
+            # Gemma 4 thinking mode: list of {'type': 'thinking'/'text', ...} dicts
+            # Collect only text blocks, skip thinking blocks entirely
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    block_type = block.get("type", "")
+                    if block_type == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif block_type == "thinking":
+                        # Silently discard — thinking is internal reasoning,
+                        # not meant to be shown to the user or parsed as JSON
+                        continue
+                    elif "text" in block:
+                        # Older Gemini-style block with no 'type' key
+                        text_parts.append(block["text"])
+
+            if text_parts:
+                return "".join(text_parts)
+
+            # Nothing useful found — fall back to string representation
+            return str(content)
+
+        return str(content)
 
     def _call_llm(self, messages: list) -> AIMessage:
         input_tokens = RateLimitHandler.estimate_tokens(
@@ -186,8 +196,6 @@ class BaseAgent(ABC):
                 if isinstance(m.content, str)
             )
         )
-        # Pass input_tokens only for TPM check — Google's quota is on input tokens
-        # Add 1000 buffer for expected output when recording after the call
         estimated = input_tokens + 1000
 
         response = self.rate_limiter.call_with_retry(
@@ -212,7 +220,6 @@ class BaseAgent(ABC):
         Run the agent with filtered message history.
         Each agent uses its own independent history to avoid cross-contamination.
         """
-        # Apply memory isolation filter — pass state for independent history agents
         filtered_messages = _filter_messages_for_agent(self.agent_name, messages, state=state)
 
         tools_schema_str = ""
@@ -251,10 +258,8 @@ class BaseAgent(ABC):
 
             if parsed and self._is_agent_response(parsed):
                 response_text = parsed.get("response", raw_text)
-                # logger.info(f"[{self.agent_name}] Structured response received.")
                 return response_text, parsed
 
-            # logger.info(f"[{self.agent_name}] Plain text response.")
             return raw_text.strip(), None
 
         logger.warning(f"[{self.agent_name}] Max tool iterations reached.")

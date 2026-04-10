@@ -61,11 +61,11 @@ class DocsAgent(BaseAgent):
 
 
 def _execute_action(action: str, params: dict, state: AgentState, slack_post_fn) -> tuple[bool, str]:
-    from tools.docs_api import docs_create, docs_read, docs_update
+    from tools.docs_api import docs_create_formatted, docs_read, docs_update_formatted
 
     try:
         if action == "docs_create":
-            doc    = docs_create(
+            doc    = docs_create_formatted(
                 title=params.get("title", "Untitled Document"),
                 content=params.get("content", ""),
                 slack_post_fn=slack_post_fn,
@@ -90,7 +90,7 @@ def _execute_action(action: str, params: dict, state: AgentState, slack_post_fn)
 
         elif action == "docs_update":
             doc_id = _extract_id_from_url(params.get("doc_id", ""))
-            doc    = docs_update(
+            doc    = docs_update_formatted(
                 doc_id=doc_id,
                 new_content=params.get("new_content", ""),
                 slack_post_fn=slack_post_fn,

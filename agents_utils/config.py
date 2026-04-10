@@ -38,33 +38,15 @@ EMAIL_LAYOUTS_DIR = PROJECT_ROOT / "email_layouts"
 
 # ── Model Assignments ──────────────────────────────────────────────────────────
 
-# MODELS = {
-#     "supervisor":        "gemini-3.1-flash-lite-preview",
-#     "planner":           "gemma-3-27b-it",
-#     "researcher":        "gemma-3-12b-it",
-#     "deep_researcher":   "gemini-3.1-flash-lite-preview",
-#     "email_composer":    "gemma-3-4b-it",
-#     "linkedin_composer": "gemma-3n-e4b-it",
-#     "task_classifier":   "gemma-3-27b-it",
-#     "memory":            "gemini-3.1-flash-lite-preview",
-#     "validator":         "gemma-3n-e2b-it",
-#     # Google agents — focused, small models
-#     "gmail_agent":       "gemma-3-4b-it",
-#     "calendar_agent":    "gemma-3-4b-it",
-#     "docs_agent":        "gemma-3-4b-it",
-#     "sheets_agent":      "gemma-3-4b-it",
-# }
-
-# Fallback model assignments (all Gemma)
 MODELS = {
-    "supervisor":        "gemma-3-27b-it",
+    "supervisor":        "gemma-4-31b-it",    # Upgraded: best reasoning for orchestration
     "planner":           "gemma-3-27b-it",
-    "researcher":        "gemma-3-12b-it",
-    "deep_researcher":   "gemma-3-12b-it",
+    "researcher":        "gemma-3-27b-it",
+    "deep_researcher":   "gemma-3-27b-it",
     "email_composer":    "gemma-3-4b-it",
     "linkedin_composer": "gemma-3n-e4b-it",
     "task_classifier":   "gemma-3-27b-it",
-    "memory":            "gemma-3-4b-it",
+    "memory":            "gemma-4-31b-it",
     "validator":         "gemma-3n-e2b-it",
     "gmail_agent":       "gemma-3-4b-it",
     "calendar_agent":    "gemma-3-4b-it",
@@ -75,13 +57,14 @@ MODELS = {
 # ── Model Context Windows ──────────────────────────────────────────────────────
 
 MODEL_CONTEXT_WINDOWS = {
-    "gemini-3.1-flash-lite-preview": 250000,
-    "gemma-3-27b-it":  128000,
-    "gemma-3-12b-it":  128000,
-    "gemma-3-4b-it":   128000,
-    "gemma-3n-e2b-it":  32000,
-    "gemma-3-1b-it":    32000,
-    "gemma-3n-e4b-it": 128000,
+    "gemma-4-31b-it":       256000,
+    "gemma-4-26b-a4b-it":   256000,
+    "gemma-3-27b-it":       128000,
+    "gemma-3-12b-it":       128000,
+    "gemma-3-4b-it":        128000,
+    "gemma-3n-e2b-it":       32000,
+    "gemma-3-1b-it":         32000,
+    "gemma-3n-e4b-it":      128000,
 }
 
 # ── Retry Limits Per Agent ─────────────────────────────────────────────────────

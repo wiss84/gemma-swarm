@@ -9,7 +9,7 @@ Posts summary to autonomous Slack channel.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 def run(slack_client, autonomous_channel_id: str):
     """
     Post a daily summary of autonomous activity to the Slack channel.
-    Skips if no activity was logged in the last 24 hours.
+    The summary covers the previous 24 hours of logged activity.
+    Skips if no activity was logged in that window.
     """
     from autonomous.settings import load_settings, save_settings
     from autonomous.jobs.activity_logger import read_recent_logs
@@ -31,7 +32,7 @@ def run(slack_client, autonomous_channel_id: str):
     if not logs:
         logger.info("[daily_summary] No activity in last 24h — skipping summary.")
         # Still mark as done today so we don't keep checking
-        settings["last_summary_date"] = datetime.utcnow().date().isoformat()
+        settings["last_summary_date"] = datetime.now(timezone.utc).date().isoformat()
         save_settings(settings)
         return
 
@@ -41,14 +42,19 @@ def run(slack_client, autonomous_channel_id: str):
         for row in logs
     )
 
-    prompt = f"""You are summarizing today's automated activity for the user of Gemma Swarm.
+    # The summary covers the previous 24 hours, so label it with yesterday's date.
+    # Example: if the app starts on Apr 8 at 9am, this summarises Apr 7 9am → Apr 8 9am,
+    # so labelling it "Apr 7" is more accurate than "Apr 8".
+    yesterday_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%B %d, %Y")
 
-Here is the activity log from the last 24 hours:
+    prompt = f"""You are summarizing the last 24 hours of automated activity for the user of Gemma Swarm.
+
+Here is the activity log:
 {log_lines}
 
 Write a short daily summary in EXACTLY this format — no extra text:
 
-📊 *Autonomous Daily Summary — {datetime.now().strftime("%B %d, %Y")}*
+📊 *Autonomous Daily Summary — {yesterday_str}*
 
 ✉️ *Emails:* [summarize email watcher and inbox checker activity, or "Nothing new"]
 📅 *Calendar:* [summarize calendar reminders, or "No events today"]
@@ -76,5 +82,5 @@ Keep each line to one sentence. Be direct and factual. Do not add extra sections
         return
 
     # Mark summary as done today
-    settings["last_summary_date"] = datetime.utcnow().date().isoformat()
+    settings["last_summary_date"] = datetime.now(timezone.utc).date().isoformat()
     save_settings(settings)

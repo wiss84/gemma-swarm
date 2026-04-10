@@ -9,8 +9,9 @@ Three tools for agentic search:
 
 Fetching Strategy:
 - PRIMARY: Advanced free fetcher (trafilatura + BeautifulSoup, caching, retry logic)
-- FALLBACK: Jina Reader API (when free fetcher fails)
-- BENEFIT: Highly sustainable, no token limits on primary fetcher
+- FALLBACK: Jina Reader API (when free fetcher fails with non-HTTP errors only)
+- 4xx HTTP errors (404, 403, etc.) are returned immediately without trying Jina —
+  they are permanent failures that Jina cannot fix.
 
 Large pages are split into 10,000 char chunks. The researcher reads them
 sequentially by calling fetch_next_chunk until all chunks are read.
@@ -18,6 +19,7 @@ No LLM is involved in chunking — content is never altered or summarized.
 """
 
 import os
+import re
 import httpx
 import logging
 from pydantic import BaseModel, Field
@@ -34,12 +36,11 @@ logger = logging.getLogger(__name__)
 SEARCH_MAX_RESULTS = 20
 FETCH_TIMEOUT      = 20
 JINA_READER_URL    = "https://r.jina.ai/"
-MAX_PAGE_CHARS     = 40000  # Cap raw page content before chunking
-CHUNK_SIZE         = 10000  # ~2,500 tokens per chunk, safe for 15k TPM limit
+MAX_PAGE_CHARS     = 40000
+CHUNK_SIZE         = 10000
 
 # ── In-memory chunk store ──────────────────────────────────────────────────────
-# Keyed by URL. Stores remaining chunks after chunk 1 is returned.
-# { url: [chunk2, chunk3, ...] }
+
 _page_chunks: dict[str, list[str]] = {}
 
 
@@ -76,23 +77,42 @@ def _ddg_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> list[dict]
 
 def _fetch_raw_page(url: str) -> str:
     """
-    Fetch page content. Uses free fetcher as primary, falls back to Jina.
-    Returns clean markdown text.
+    Fetch page content. Uses free fetcher as primary, falls back to Jina only
+    for genuine content failures (thin/empty content) — not for 4xx errors.
+
+    4xx responses (404, 403, 410, etc.) mean the page doesn't exist or is
+    permanently inaccessible. Passing these to Jina wastes an API call since
+    Jina will get the same HTTP error. They are returned as-is for the caller
+    to treat as skip signals.
+
+    Returns clean markdown text, or an error string starting with '['.
     """
-    # PRIMARY: Try free web fetcher first
     logger.info(f"[fetch_page] Trying free fetcher for: {url}")
     try:
         content = fetch_page_free(url, force_refresh=False)
-        # Check if it's an error message
+
+        # 4xx/5xx HTTP errors: permanent or server-side failures.
+        # Jina cannot fix these — skip the fallback and return immediately.
+        if re.match(r"^\[HTTP [45]\d\d ", content):
+            logger.info(f"[fetch_page] HTTP error — skipping Jina: {content}")
+            return content
+
+        # Successful content — return it
         if not content.startswith("["):
             logger.info(f"[fetch_page] Free fetcher succeeded ({len(content)} chars)")
             return content
-        else:
-            logger.warning(f"[fetch_page] Free fetcher returned error: {content}")
+
+        # Other error signals (timeout, no extractable text, etc.)
+        # These may be recoverable by Jina — fall through
+        logger.warning(f"[fetch_page] Free fetcher returned error: {content}")
+
     except Exception as e:
         logger.warning(f"[fetch_page] Free fetcher failed: {e}")
 
-    # FALLBACK: Use Jina if free fetcher failed
+    # FALLBACK: Jina for cases the free fetcher couldn't handle
+    # (timeouts, JS-heavy pages with thin content, encoding issues, etc.)
+    # When Jina succeeds here, note the failure pattern for the free fetcher
+    # so it can be improved in tests/
     logger.info(f"[fetch_page] Falling back to Jina for: {url}")
     jina_url = f"{JINA_READER_URL}{url}"
     headers  = {"Accept": "text/plain"}
@@ -139,7 +159,6 @@ def _split_into_chunks(content: str) -> list[str]:
             chunks.append(content[start:])
             break
 
-        # Try to break at a newline boundary to avoid cutting mid-line
         newline_pos = content.rfind("\n", start, end)
         if newline_pos > start:
             end = newline_pos + 1
@@ -151,7 +170,6 @@ def _split_into_chunks(content: str) -> list[str]:
 
 
 def _format_chunk(chunk: str, current: int, total: int, url: str) -> str:
-    """Format a chunk with position info and next-step instructions."""
     if total == 1:
         return f"Content from {url}:\n\n{chunk}"
 
@@ -231,11 +249,10 @@ def fetch_page(url: str) -> str:
 
     raw = _fetch_raw_page(url)
 
-    # Return error messages as-is
+    # Return error messages as-is — the researcher will skip this URL
     if raw.startswith("["):
         return raw
 
-    # Cap page size before chunking
     if len(raw) > MAX_PAGE_CHARS:
         raw = raw[:MAX_PAGE_CHARS]
         logger.info(f"[fetch_page] Page capped at {MAX_PAGE_CHARS} chars for {url}")
@@ -246,13 +263,11 @@ def fetch_page(url: str) -> str:
     logger.info(f"[fetch_page] {len(raw)} chars → {total} chunk(s) for {url}")
 
     if total == 1:
-        # Small page — return everything at once
         _page_chunks.pop(url, None)
         return _format_chunk(chunks[0], 1, 1, url)
 
-    # Large page — store remaining chunks and total, return first
-    _page_chunks[url]                  = chunks[1:]  # Store chunks 2..N
-    _page_chunks[f"{url}__total"]      = total        # Store total for progress display
+    _page_chunks[url]             = chunks[1:]
+    _page_chunks[f"{url}__total"] = total
     return _format_chunk(chunks[0], 1, total, url)
 
 
@@ -279,15 +294,10 @@ def fetch_next_chunk(url: str) -> str:
             f"Either the page was fully read or fetch_page was not called first.]"
         )
 
-    chunk = remaining.pop(0)
-
-    # Calculate position: we need total to display progress
-    # We don't store total explicitly, so we infer from what's left
-    # chunks_left = len(remaining) after pop, so current = total - chunks_left
-    # We store total in a separate key to track progress
+    chunk     = remaining.pop(0)
     total_key = f"{url}__total"
+
     if total_key not in _page_chunks:
-        # Shouldn't happen but handle gracefully
         current = "?"
         total   = "?"
     else:

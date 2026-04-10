@@ -35,20 +35,22 @@ def register_autonomous_handlers(app):
 
         channel_name = _get_text(values, "channel_block", "channel_input").strip().lstrip("#")
 
-        email_senders_raw = _get_text(values, "email_senders_block", "email_senders_input")
-        email_senders     = [s.strip() for s in email_senders_raw.split(",") if s.strip()]
+        email_senders_raw  = _get_text(values, "email_senders_block", "email_senders_input")
+        email_senders      = [s.strip() for s in email_senders_raw.split(",") if s.strip()]
+        watch_interval     = int(_get_option(values, "watch_interval_block", "watch_interval_input") or 15)
+        reply_drafts       = _get_toggle(values, "reply_drafts_block", "reply_drafts_input")
 
-        watch_interval    = int(_get_option(values, "watch_interval_block", "watch_interval_input") or 15)
+        inbox_enabled      = _get_toggle(values, "inbox_enabled_block", "inbox_enabled_input")
+        inbox_interval     = int(_get_option(values, "inbox_interval_block", "inbox_interval_input") or 30)
 
-        inbox_enabled     = _get_toggle(values, "inbox_enabled_block", "inbox_enabled_input")
-        inbox_interval    = int(_get_option(values, "inbox_interval_block", "inbox_interval_input") or 30)
+        topic_1            = _get_text(values, "topic_1_block", "topic_1_input").strip()
+        topic_2            = _get_text(values, "topic_2_block", "topic_2_input").strip()
+        topics             = [t for t in [topic_1, topic_2] if t]
+        research_interval  = int(_get_option(values, "research_interval_block", "research_interval_input") or 3)
 
-        topic_1           = _get_text(values, "topic_1_block", "topic_1_input").strip()
-        topic_2           = _get_text(values, "topic_2_block", "topic_2_input").strip()
-        topics            = [t for t in [topic_1, topic_2] if t]
-
-        research_interval = int(_get_option(values, "research_interval_block", "research_interval_input") or 3)
-        cal_offsets       = _get_multi_check(values, "cal_offsets_block", "cal_offsets_input")
+        cal_offsets        = _get_multi_check(values, "cal_offsets_block", "cal_offsets_input")
+        voice_alerts       = _get_toggle(values, "voice_alerts_block", "voice_alerts_input")
+        voice_llm          = _get_toggle(values, "voice_llm_block", "voice_llm_input")
 
         if active and not channel_name:
             ack(response_action="errors", errors={
@@ -74,16 +76,19 @@ def register_autonomous_handlers(app):
         from autonomous.settings import load_settings, save_settings
         settings = load_settings()
 
-        settings["active"]                               = active
-        settings["autonomous_channel"]                   = channel_name
-        settings["autonomous_channel_id"]                = channel_id
-        settings["email_watch"]["senders"]               = email_senders
-        settings["email_watch"]["poll_interval_minutes"] = watch_interval
-        settings["inbox_check"]["enabled"]               = inbox_enabled
-        settings["inbox_check"]["poll_interval_minutes"] = inbox_interval
-        settings["research"]["topics"]                   = topics
-        settings["research"]["interval_days"]            = research_interval
-        settings["calendar_notify"]["notify_offsets"]    = cal_offsets if cal_offsets else [30]
+        settings["active"]                                    = active
+        settings["autonomous_channel"]                        = channel_name
+        settings["autonomous_channel_id"]                     = channel_id
+        settings["email_watch"]["senders"]                    = email_senders
+        settings["email_watch"]["poll_interval_minutes"]      = watch_interval
+        settings["email_watch"]["reply_drafts_enabled"]       = reply_drafts
+        settings["inbox_check"]["enabled"]                    = inbox_enabled
+        settings["inbox_check"]["poll_interval_minutes"]      = inbox_interval
+        settings["research"]["topics"]                        = topics
+        settings["research"]["interval_days"]                 = research_interval
+        settings["calendar_notify"]["notify_offsets"]         = cal_offsets if cal_offsets else [30]
+        settings["calendar_notify"]["voice_alerts"]           = voice_alerts
+        settings["calendar_notify"]["voice_llm"]              = voice_llm
 
         if not settings.get("activity_log_sheet_id") and channel_id:
             try:
@@ -118,17 +123,20 @@ def _build_modal() -> dict:
     from autonomous.settings import load_settings
     s = load_settings()
 
-    active         = s.get("active", False)
-    channel        = s.get("autonomous_channel", "")
-    senders        = ", ".join(s["email_watch"].get("senders", []))
-    watch_interval = str(s["email_watch"].get("poll_interval_minutes", 15))
-    inbox_enabled  = s["inbox_check"].get("enabled", False)
-    inbox_interval = str(s["inbox_check"].get("poll_interval_minutes", 30))
-    topics         = s["research"].get("topics", ["", ""])
-    topic_1        = topics[0] if len(topics) > 0 else ""
-    topic_2        = topics[1] if len(topics) > 1 else ""
-    research_days  = str(s["research"].get("interval_days", 3))
-    cal_offsets    = s["calendar_notify"].get("notify_offsets", [30])
+    active          = s.get("active", False)
+    channel         = s.get("autonomous_channel", "")
+    senders         = ", ".join(s["email_watch"].get("senders", []))
+    watch_interval  = str(s["email_watch"].get("poll_interval_minutes", 15))
+    reply_drafts    = s["email_watch"].get("reply_drafts_enabled", False)
+    inbox_enabled   = s["inbox_check"].get("enabled", False)
+    inbox_interval  = str(s["inbox_check"].get("poll_interval_minutes", 30))
+    topics          = s["research"].get("topics", ["", ""])
+    topic_1         = topics[0] if len(topics) > 0 else ""
+    topic_2         = topics[1] if len(topics) > 1 else ""
+    research_days   = str(s["research"].get("interval_days", 3))
+    cal_offsets     = s["calendar_notify"].get("notify_offsets", [30])
+    voice_alerts    = s["calendar_notify"].get("voice_alerts", False)
+    voice_llm       = s["calendar_notify"].get("voice_llm", False)
 
     return {
         "type":        "modal",
@@ -137,6 +145,7 @@ def _build_modal() -> dict:
         "submit":      {"type": "plain_text", "text": "Save"},
         "close":       {"type": "plain_text", "text": "Cancel"},
         "blocks": [
+            # ── Master toggle ──────────────────────────────────────────────────
             {
                 "type":     "input",
                 "block_id": "active_block",
@@ -163,6 +172,8 @@ def _build_modal() -> dict:
                 },
             },
             {"type": "divider"},
+
+            # ── Email Watcher ──────────────────────────────────────────────────
             {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": "*✉️ Email Watcher*\nWatch for new emails from specific senders."},
@@ -192,7 +203,30 @@ def _build_modal() -> dict:
                     "options":        _minute_options([5, 10, 15, 30, 60]),
                 },
             },
+            {
+                "type":     "input",
+                "block_id": "reply_drafts_block",
+                "optional": True,
+                "label":    {"type": "plain_text", "text": "✍️ Smart Email Reply Drafts"},
+                "hint":     {
+                    "type": "plain_text",
+                    "text": (
+                        "⚠️ Privacy notice: When enabled, the body of new emails is passed to the AI model "
+                        "so it can classify importance and draft replies. Email content will be processed "
+                        "by the configured LLM (Gemini free tier by default). Only enable if you are "
+                        "comfortable with this."
+                    ),
+                },
+                "element":  {
+                    "type":            "checkboxes",
+                    "action_id":       "reply_drafts_input",
+                    "options":         [{"text": {"type": "plain_text", "text": "Enable smart reply drafts for important emails"}, "value": "enabled"}],
+                    "initial_options": ([{"text": {"type": "plain_text", "text": "Enable smart reply drafts for important emails"}, "value": "enabled"}] if reply_drafts else []),
+                },
+            },
             {"type": "divider"},
+
+            # ── Inbox Checker ──────────────────────────────────────────────────
             {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": "*📬 Inbox Checker*\nCheck for all new unread emails periodically."},
@@ -222,6 +256,8 @@ def _build_modal() -> dict:
                 },
             },
             {"type": "divider"},
+
+            # ── Research & LinkedIn ────────────────────────────────────────────
             {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": "*🔍 Research & LinkedIn Drafts*\nAutomatically research topics and generate LinkedIn post drafts."},
@@ -263,6 +299,8 @@ def _build_modal() -> dict:
                 },
             },
             {"type": "divider"},
+
+            # ── Calendar Reminders ─────────────────────────────────────────────
             {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": "*📅 Calendar Reminders*\nGet notified before calendar events. Select multiple offsets for the same event. Calendar is rescanned every hour."},
@@ -277,6 +315,42 @@ def _build_modal() -> dict:
                     "action_id":       "cal_offsets_input",
                     "options":         _cal_checkbox_options(),
                     "initial_options": _cal_initial_options(cal_offsets),
+                },
+            },
+            {
+                "type":     "input",
+                "block_id": "voice_alerts_block",
+                "optional": True,
+                "label":    {"type": "plain_text", "text": "🔊 Voice Alerts"},
+                "hint":     {
+                    "type": "plain_text",
+                    "text": "Speaks a short alert aloud on the machine running the backend when a calendar event is due.",
+                },
+                "element":  {
+                    "type":            "checkboxes",
+                    "action_id":       "voice_alerts_input",
+                    "options":         [{"text": {"type": "plain_text", "text": "Enable voice alerts"}, "value": "enabled"}],
+                    "initial_options": ([{"text": {"type": "plain_text", "text": "Enable voice alerts"}, "value": "enabled"}] if voice_alerts else []),
+                },
+            },
+            {
+                "type":     "input",
+                "block_id": "voice_llm_block",
+                "optional": True,
+                "label":    {"type": "plain_text", "text": "🤖 AI-generated voice phrase"},
+                "hint":     {
+                    "type": "plain_text",
+                    "text": (
+                        "Uses the LLM to generate a natural-sounding spoken reminder instead of the "
+                        "default template (e.g. 'Just a heads up, your Client Meeting starts in 15 minutes'). "
+                        "Adds ~1 LLM call per notification. Requires Voice Alerts to be enabled."
+                    ),
+                },
+                "element":  {
+                    "type":            "checkboxes",
+                    "action_id":       "voice_llm_input",
+                    "options":         [{"text": {"type": "plain_text", "text": "Use AI-generated voice phrase"}, "value": "enabled"}],
+                    "initial_options": ([{"text": {"type": "plain_text", "text": "Use AI-generated voice phrase"}, "value": "enabled"}] if voice_llm else []),
                 },
             },
         ],

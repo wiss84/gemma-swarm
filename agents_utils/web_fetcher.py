@@ -1,21 +1,23 @@
 """
 Gemma Swarm — Advanced Free Page Fetcher
 ==========================================
-A production-grade, fully free alternative to Jina AI for fetching and cleaning web page content.
+A production-grade, fully free web page fetcher for LLM research pipelines.
 
 FEATURES:
     1. Retry logic with exponential backoff (3 attempts)
-    2. Robots.txt compliance check (cached per domain) — bypasses blocks
+    2. Robots.txt compliance check (cached per domain)
     3. PDF text extraction via PyPDF2
     4. Open Graph / metadata extraction
     5. trafilatura for main content extraction (fallback to BeautifulSoup)
     6. LRU cache for recent fetches (TTL-based, 1 hour)
-    7. Language detection via <html lang> — skips non-English pages
+    7. Language detection via <html lang>
     8. Smart truncation at paragraph/section boundary
     9. Content deduplication via SHA-256 hashing
-    10. Playwright with ad/image blocking for JS-heavy pages
-    11. Wikipedia REST API fallback for 403s
-    12. Content-type validation — rejects binary/non-text responses
+    10. Wikipedia REST API fallback for 403s
+    11. Content-type validation — rejects binary/non-text responses
+
+NOTE: Thin content from JS-heavy pages is handled by the Jina fallback in
+web_search_tool.py, which is faster and requires no browser install.
 """
 
 import hashlib
@@ -34,9 +36,6 @@ if sys.platform == "win32":
     os.system("chcp 65001 >nul")
 
 logger = logging.getLogger(__name__)
-
-# Suppress Playwright's asyncio warnings (not applicable to sync API)
-logging.getLogger("playwright").setLevel(logging.ERROR)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -72,14 +71,6 @@ REMOVE_TAGS = [
     "script", "style", "nav", "footer", "header", "aside",
     "iframe", "noscript", "svg", "figure", "form", "button",
     "input", "select", "textarea", "menu", "dialog", "details",
-]
-
-AD_BLOCK_DOMAINS = [
-    "doubleclick.net", "googlesyndication.com", "googleadservices.com",
-    "adservice.google", "facebook.com/tr", "analytics.google",
-    "adsystem.com", "adservice.", "adnxs.com", "taboola.com",
-    "outbrain.com", "adsrvr.org", "casalemedia.com", "criteo.com",
-    "amazon-adsystem.com", "ads-twitter.com",
 ]
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".bmp", ".tiff"}
@@ -122,21 +113,16 @@ _content_cache = TTLCache()
 _robots_cache: dict[str, tuple[urllib.robotparser.RobotFileParser, float]] = {}
 
 def _check_robots(url: str) -> bool:
-    """
-    Check if URL is allowed by robots.txt.
-    NOTE: Always returns True to allow fetching. We respect robots.txt for logging
-    purposes only, but do not block content retrieval (similar to Jina's approach).
-    """
+    """Check robots.txt — always allows but logs disallowed URLs for diagnostics."""
     parsed = urllib.parse.urlparse(url)
-    base = f"{parsed.scheme}://{parsed.netloc}"
+    base   = f"{parsed.scheme}://{parsed.netloc}"
 
     if base in _robots_cache:
         rp, fetched_at = _robots_cache[base]
         if time.time() - fetched_at < ROBOTS_CACHE_TTL:
-            allowed = rp.can_fetch(BROWSER_HEADERS["User-Agent"], url)
-            if not allowed:
-                logger.debug(f"[fetcher] robots.txt marks {url} as disallowed (but allowing anyway)")
-            return True  # Always allow, just log
+            if not rp.can_fetch(BROWSER_HEADERS["User-Agent"], url):
+                logger.debug(f"[fetcher] robots.txt disallows {url} (allowing anyway)")
+            return True
 
     rp = urllib.robotparser.RobotFileParser()
     rp.set_url(f"{base}/robots.txt")
@@ -146,13 +132,8 @@ def _check_robots(url: str) -> bool:
         return True
 
     _robots_cache[base] = (rp, time.time())
-
-    # Check if explicitly disallowed — log it but still allow
-    ua_allowed = rp.can_fetch(BROWSER_HEADERS["User-Agent"], url)
-    if not ua_allowed:
-        logger.debug(f"[fetcher] robots.txt marks {url} as disallowed (but allowing anyway)")
-    
-    # Always return True to allow content retrieval
+    if not rp.can_fetch(BROWSER_HEADERS["User-Agent"], url):
+        logger.debug(f"[fetcher] robots.txt disallows {url} (allowing anyway)")
     return True
 
 # ── Content deduplication ─────────────────────────────────────────────────────
@@ -172,23 +153,18 @@ def _is_duplicate(text: str) -> bool:
 # ── Language detection ────────────────────────────────────────────────────────
 
 def _detect_language(html: str) -> Optional[str]:
-    """Extract language from <html lang='...'> or <meta> tags."""
     match = re.search(r'<html[^>]*\blang=["\']([a-zA-Z-]+)', html, re.I)
     if match:
         return match.group(1).split("-")[0].lower()
-
     match = re.search(r'<meta[^>]*\bhttp-equiv=["\']?content-language["\']?[^>]*content=["\']([a-zA-Z-]+)', html, re.I)
     if match:
         return match.group(1).split("-")[0].lower()
-
     return None
 
 # ── Metadata extraction ───────────────────────────────────────────────────────
 
 def _extract_metadata(html: str) -> dict:
-    """Extract Open Graph and meta tags for attribution."""
     meta = {}
-
     for pattern, key in [
         (r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']*)', "og_title"),
         (r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']*)', "og_description"),
@@ -199,42 +175,36 @@ def _extract_metadata(html: str) -> dict:
         m = re.search(pattern, html, re.I)
         if m:
             meta[key] = m.group(1).strip()
-
     return meta
 
 # ── PDF extraction ────────────────────────────────────────────────────────────
 
 def _extract_pdf(url: str) -> str:
-    """Download and extract text from a PDF file."""
     try:
         with httpx.Client(headers=BROWSER_HEADERS, timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
             resp = client.get(url)
             resp.raise_for_status()
-
         import io
         from PyPDF2 import PdfReader
         reader = PdfReader(io.BytesIO(resp.content))
-        pages = []
+        pages  = []
         for i, page in enumerate(reader.pages):
             text = page.extract_text()
             if text:
                 pages.append(f"[Page {i+1}]\n{text.strip()}")
-
         result = "\n\n".join(pages)
         return result if result else "[PDF downloaded but no extractable text found]"
-
     except ImportError:
         return "[PyPDF2 not installed. Run: pip install PyPDF2]"
     except Exception as e:
         return f"[PDF extraction failed: {e}]"
 
-# ── Content extraction: trafilatura (primary) + BeautifulSoup (fallback) ──────
+# ── Content extraction ────────────────────────────────────────────────────────
 
 def _extract_content(html: str, url: str) -> dict:
-    """Extract clean readable text from HTML. Tries trafilatura first, then BS4."""
-    metadata = _extract_metadata(html)
+    """Extract clean readable text. Tries trafilatura first, then BeautifulSoup."""
+    metadata         = _extract_metadata(html)
     metadata['lang'] = _detect_language(html)
-    # Try trafilatura — best-in-class for article extraction
     try:
         import trafilatura
         result = trafilatura.extract(
@@ -252,12 +222,10 @@ def _extract_content(html: str, url: str) -> dict:
     except Exception as e:
         logger.debug(f"[fetcher] trafilatura failed: {e}")
 
-    # Fallback to BeautifulSoup
-    content = _clean_html_bs4(html, url)
-    return {'content': content, 'metadata': metadata}
+    return {'content': _clean_html_bs4(html, url), 'metadata': metadata}
+
 
 def _clean_html_bs4(html: str, url: str) -> str:
-    """Parse HTML with BeautifulSoup and extract clean readable text."""
     try:
         from bs4 import BeautifulSoup
     except ImportError:
@@ -283,18 +251,16 @@ def _clean_html_bs4(html: str, url: str) -> str:
     )
 
     lines = []
-    seen = set()
+    seen  = set()
 
     for element in main_content.find_all(["h1", "h2", "h3", "h4", "p", "li", "td", "th", "pre", "code"]):
         text = element.get_text(separator=" ", strip=True)
         if not text or len(text) < 20 or text in seen:
             continue
         seen.add(text)
-
         tag = element.name
         if tag.startswith("h"):
-            level = int(tag[1])
-            lines.append(f"\n{'#' * level} {text}\n")
+            lines.append(f"\n{'#' * int(tag[1])} {text}\n")
         elif tag == "li":
             lines.append(f"- {text}")
         elif tag in ("pre", "code"):
@@ -314,34 +280,24 @@ def _clean_html_bs4(html: str, url: str) -> str:
 # ── Smart truncation ──────────────────────────────────────────────────────────
 
 def _smart_truncate(text: str, max_chars: int = MAX_CHARS) -> str:
-    """Truncate at the nearest paragraph or section boundary."""
     if len(text) <= max_chars:
         return text
-
     cutoff = max_chars
-    # Try to break at double newline (paragraph boundary)
     for pos in range(cutoff, max(cutoff - 2000, 0), -1):
         if text[pos:pos+2] == "\n\n":
             return text[:pos] + "\n\n[Content truncated]"
-
-    # Fallback: break at single newline
     last_nl = text.rfind("\n", cutoff - 500, cutoff)
     if last_nl > 0:
         return text[:last_nl] + "\n\n[Content truncated]"
-
     return text[:max_chars] + "\n\n[Content truncated]"
 
 # ── Wikipedia API fallback ────────────────────────────────────────────────────
 
 def _fetch_wikipedia_api(url: str) -> dict:
-    """Fallback for Wikipedia: use the Wikipedia REST API."""
     try:
-        title = urllib.parse.unquote(url.split("/wiki/")[-1])
+        title   = urllib.parse.unquote(url.split("/wiki/")[-1])
         api_url = f"https://en.wikipedia.org/api/rest_v1/page/html/{urllib.parse.quote(title, safe='')}"
-        headers = {
-            "User-Agent": "GemmaSwarm/1.0 (research tool; contact: admin@example.com)",
-            "Accept": "text/html",
-        }
+        headers = {"User-Agent": "GemmaSwarm/1.0", "Accept": "text/html"}
         with httpx.Client(headers=headers, timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
             resp = client.get(api_url)
             resp.raise_for_status()
@@ -352,7 +308,11 @@ def _fetch_wikipedia_api(url: str) -> dict:
 # ── HTTP fetch with retry ─────────────────────────────────────────────────────
 
 def _fetch_with_httpx(url: str) -> dict:
-    """Fetch page with httpx, retrying on transient failures."""
+    """
+    Fetch page with httpx, retrying on transient failures.
+    Returns {'content': '...', 'metadata': {...}}.
+    Content starts with '[' when it's an error/skip signal.
+    """
     last_error = None
 
     for attempt in range(MAX_RETRIES):
@@ -383,18 +343,19 @@ def _fetch_with_httpx(url: str) -> dict:
                 if "text/html" not in content_type and "text/plain" not in content_type:
                     return {'content': f"[Skipped non-text content ({content_type}) for {url}]", 'metadata': {}}
 
-                html = resp.text
-                return _extract_content(html, url)
+                return _extract_content(resp.text, url)
 
         except httpx.TimeoutException:
             last_error = f"[Timeout fetching {url}]"
         except httpx.HTTPStatusError as e:
-            if e.response.status_code >= 500:
-                last_error = f"[HTTP {e.response.status_code} for {url}]"
-            elif e.response.status_code == 403 and "wikipedia.org" in url:
+            status = e.response.status_code
+            if status == 403 and "wikipedia.org" in url:
                 return _fetch_wikipedia_api(url)
-            else:
-                return {'content': f"[HTTP {e.response.status_code} for {url}]", 'metadata': {}}
+            # 4xx errors (including 404) are permanent — no point retrying
+            if 400 <= status < 500:
+                return {'content': f"[HTTP {status} for {url}]", 'metadata': {}}
+            # 5xx — transient, will retry
+            last_error = f"[HTTP {status} for {url}]"
         except Exception as e:
             last_error = f"[Error fetching {url}: {e}]"
 
@@ -405,91 +366,19 @@ def _fetch_with_httpx(url: str) -> dict:
 
     return {'content': last_error or f"[Failed to fetch {url} after {MAX_RETRIES} attempts]", 'metadata': {}}
 
-# ── Playwright with ad blocking ───────────────────────────────────────────────
-
-def _should_block_request(request_url: str) -> bool:
-    """Return True if the request URL matches an ad/tracker domain."""
-    try:
-        parsed = urllib.parse.urlparse(request_url)
-        domain = parsed.netloc.lower()
-        for blocked in AD_BLOCK_DOMAINS:
-            if blocked in domain:
-                return True
-    except Exception:
-        pass
-    return False
-
-def _fetch_with_playwright(url: str) -> dict:
-    """Fetch JS-rendered page with Playwright, blocking ads and images."""
-    try:
-        from playwright.sync_api import sync_playwright
-        import threading
-
-        # Run Playwright in a separate thread to avoid asyncio conflicts
-        result_container = {}
-        error_container = {}
-
-        def fetch_in_thread():
-            try:
-                with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=True)
-                    context = browser.new_context(
-                        user_agent=BROWSER_HEADERS["User-Agent"],
-                        extra_http_headers={"Accept-Language": BROWSER_HEADERS["Accept-Language"]},
-                    )
-                    page = context.new_page()
-
-                    page.route("**/*", lambda route: route.abort() if _should_block_request(route.request.url) else route.continue_())
-
-                    page.goto(url, wait_until="domcontentloaded", timeout=FETCH_TIMEOUT * 1000)
-                    page.wait_for_timeout(2000)
-
-                    html = page.content()
-                    browser.close()
-
-                    result_container['html'] = html
-            except Exception as e:
-                error_container['error'] = e
-
-        thread = threading.Thread(target=fetch_in_thread, daemon=False)
-        thread.start()
-        thread.join(timeout=FETCH_TIMEOUT * 2)
-
-        if error_container:
-            logger.warning(f"[fetcher] Playwright failed for {url}: {error_container['error']}")
-            return {'content': "", 'metadata': {}}
-
-        if 'html' not in result_container:
-            logger.warning(f"[fetcher] Playwright timeout for {url}")
-            return {'content': "", 'metadata': {}}
-
-        html = result_container['html']
-        result = _extract_content(html, url)
-        if len(result['content']) > MIN_CONTENT_CHARS:
-            return result
-        else:
-            return {'content': "", 'metadata': result['metadata']}
-
-    except ImportError:
-        logger.warning("[fetcher] Playwright not installed. Run: pip install playwright && playwright install chromium")
-        return {'content': "", 'metadata': {}}
-    except Exception as e:
-        logger.warning(f"[fetcher] Playwright error for {url}: {e}")
-        return {'content': "", 'metadata': {}}
-
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def fetch_page_free(url: str, use_playwright: bool = False, force_refresh: bool = False) -> str:
+def fetch_page_free(url: str, force_refresh: bool = False) -> str:
     """
     Fetch and clean a web page. Returns clean readable text suitable for LLM context.
-    
+    Error conditions are returned as strings starting with '['.
+
     Args:
-        url: The page URL to fetch
-        use_playwright: Force Playwright for JS-heavy pages
-        force_refresh: Bypass the cache and re-fetch
-    
+        url:           The page URL to fetch.
+        force_refresh: Bypass the cache and re-fetch.
+
     Returns:
-        Clean readable text of the page content
+        Clean readable text, or an error string starting with '['.
     """
     if not force_refresh:
         cached = _content_cache.get(url)
@@ -497,11 +386,11 @@ def fetch_page_free(url: str, use_playwright: bool = False, force_refresh: bool 
             logger.info(f"[fetcher] Cache hit for {url}")
             return cached
 
-    if not _check_robots(url):
-        return f"[Blocked by robots.txt: {url}]"
+    _check_robots(url)
 
     parsed = urllib.parse.urlparse(url)
-    ext = os.path.splitext(parsed.path)[1].lower()
+    ext    = os.path.splitext(parsed.path)[1].lower()
+
     if ext in IMAGE_EXTENSIONS:
         return f"[Skipped image file: {url}]"
 
@@ -510,21 +399,16 @@ def fetch_page_free(url: str, use_playwright: bool = False, force_refresh: bool 
     else:
         result = _fetch_with_httpx(url)
 
-        if len(result.get('content', '')) < 500 and not use_playwright:
-            logger.info(f"[fetcher] httpx returned thin content ({len(result.get('content', ''))} chars) — trying Playwright")
-            pw_result = _fetch_with_playwright(url)
-            if pw_result and len(pw_result.get('content', '')) > len(result.get('content', '')):
-                result = pw_result
-
-    content = result['content']
+    content  = result['content']
     metadata = result['metadata']
+
+    # Propagate error signals directly — caller decides whether to skip or retry
+    if content.startswith("["):
+        return content
 
     lang = metadata.get('lang')
     if lang and lang not in ("en",):
-        logger.info(f"[fetcher] Page language detected as '{lang}' — content may not be English")
-
-    if content.startswith("["):
-        return content
+        logger.info(f"[fetcher] Page language '{lang}' detected — content may not be English")
 
     if len(content) < MIN_CONTENT_CHARS:
         return f"[Page contained no extractable text: {url}]"
@@ -532,7 +416,7 @@ def fetch_page_free(url: str, use_playwright: bool = False, force_refresh: bool 
     if _is_duplicate(content):
         logger.info(f"[fetcher] Duplicate content detected for {url}")
 
-    metadata_str = "\n".join(f"{k}: {v}" for k, v in metadata.items() if v and k != 'lang')
+    metadata_str  = "\n".join(f"{k}: {v}" for k, v in metadata.items() if v and k != 'lang')
     final_content = f"{metadata_str}\n\n{content}" if metadata_str else content
     _content_cache.set(url, final_content)
     return _smart_truncate(final_content)

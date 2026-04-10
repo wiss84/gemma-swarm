@@ -4,10 +4,11 @@ Gemma Swarm — Docs API
 Google Docs API functions for creating, reading, and updating documents.
 Uses OAuth helpers from google_api.py.
 
-docs_create         — creates a doc with plain text
+docs_create           — creates a doc with plain text
 docs_create_formatted — creates a doc with proper heading/bold/bullet formatting
-docs_read           — reads a doc and returns plain text
-docs_update         — replaces all content with plain text
+docs_read             — reads a doc and returns plain text
+docs_update           — replaces all content with plain text
+docs_update_formatted — replaces all content with proper formatting applied
 """
 
 import logging
@@ -346,3 +347,70 @@ def _extract_docs_text(doc: dict) -> str:
             if run:
                 text.append(run.get("content", ""))
     return "".join(text)
+
+
+# ── Formatted update ───────────────────────────────────────────────────────────
+
+def docs_update_formatted(doc_id: str, new_content: str, slack_post_fn=None) -> dict:
+    """
+    Replace all content in a Google Doc with new content, applying full formatting.
+    Same formatting rules as docs_create_formatted:
+    ## → Heading 2, ### → Heading 3, - **Title:** → bold bullet title, etc.
+    """
+    token = _get_access_token(slack_post_fn)
+
+    # Step 1: Get current doc to find end index for deletion
+    response = requests.get(
+        f"https://docs.googleapis.com/v1/documents/{doc_id}",
+        headers=_auth_headers(token),
+        timeout=15,
+    )
+    response.raise_for_status()
+    doc       = response.json()
+    end_index = doc.get("body", {}).get("content", [{}])[-1].get("endIndex", 1)
+
+    # Step 2: Clear existing content
+    clear_requests = []
+    if end_index > 2:
+        clear_requests.append({
+            "deleteContentRange": {
+                "range": {"startIndex": 1, "endIndex": end_index - 1}
+            }
+        })
+
+    if clear_requests:
+        requests.post(
+            f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+            headers={**_auth_headers(token), "Content-Type": "application/json"},
+            json={"requests": clear_requests},
+            timeout=15,
+        ).raise_for_status()
+
+    if not new_content:
+        link = f"https://docs.google.com/document/d/{doc_id}/edit"
+        return {"id": doc_id, "title": doc.get("title", ""), "link": link}
+
+    # Step 3: Insert plain text
+    lines      = _parse_lines(new_content)
+    plain_text = "\n".join(line["text"] for line in lines) + "\n"
+
+    requests.post(
+        f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+        headers={**_auth_headers(token), "Content-Type": "application/json"},
+        json={"requests": [{"insertText": {"location": {"index": 1}, "text": plain_text}}]},
+        timeout=15,
+    ).raise_for_status()
+
+    # Step 4: Apply formatting
+    format_requests = _build_format_requests(lines)
+    if format_requests:
+        requests.post(
+            f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+            headers={**_auth_headers(token), "Content-Type": "application/json"},
+            json={"requests": format_requests},
+            timeout=15,
+        ).raise_for_status()
+
+    link = f"https://docs.google.com/document/d/{doc_id}/edit"
+    logger.info(f"[google/docs] Updated formatted doc: {doc_id}")
+    return {"id": doc_id, "title": doc.get("title", ""), "link": link}

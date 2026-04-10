@@ -3,7 +3,8 @@ Gemma Swarm — Autonomous Inbox Checker
 ========================================
 Polls Gmail inbox for ALL unread emails periodically.
 Only notifies about emails not seen in the previous check.
-Separate from email_watcher which tracks specific senders.
+Emails from watched senders (email_watch.senders) are excluded —
+those are already handled with richer notifications by email_watcher.py.
 Zero LLM calls.
 """
 
@@ -17,6 +18,7 @@ def run(slack_client, autonomous_channel_id: str):
     Fetch all unread emails from inbox.
     Compare against last_seen_ids from previous run.
     Post Slack notification only for genuinely new emails.
+    Skips emails from senders already covered by email_watcher.
     Update last_seen_ids after each run.
     """
     from autonomous.settings import load_settings, save_settings
@@ -26,6 +28,13 @@ def run(slack_client, autonomous_channel_id: str):
 
     settings      = load_settings()
     prev_seen_ids = set(settings["inbox_check"].get("last_seen_ids", []))
+
+    # Build a set of watched sender addresses (lowercased) to exclude from inbox notifications
+    watched_senders = {
+        s.strip().lower()
+        for s in settings["email_watch"].get("senders", [])
+        if s.strip()
+    }
 
     try:
         token  = _get_access_token()
@@ -54,6 +63,9 @@ def run(slack_client, autonomous_channel_id: str):
 
         if not new_ids:
             logger.info("[inbox_checker] No new unread emails since last check.")
+            # Still update last_seen_ids in case emails were read externally
+            settings["inbox_check"]["last_seen_ids"] = list(current_ids)[:50]
+            save_settings(settings)
             return
 
         # Fetch metadata for new emails only
@@ -74,38 +86,56 @@ def run(slack_client, autonomous_channel_id: str):
                 h["name"].lower(): h["value"]
                 for h in data.get("payload", {}).get("headers", [])
             }
+
+            from_raw     = headers.get("from", "")
+            from_address = _extract_email_address(from_raw).lower()
+
+            # Skip emails from watched senders — email_watcher already handles these
+            if watched_senders and from_address in watched_senders:
+                logger.info(f"[inbox_checker] Skipping watched sender: {from_address}")
+                continue
+
             new_emails.append({
-                "from":    headers.get("from", "Unknown"),
+                "from":    from_raw or "Unknown",
                 "subject": headers.get("subject", "(no subject)"),
                 "date":    headers.get("date", ""),
             })
 
-        if not new_emails:
-            return
+        if new_emails:
+            lines = [f"📬 *{len(new_emails)} new unread email(s) in your inbox:*\n"]
+            for e in new_emails:
+                lines.append(f"• *From:* {e['from']} | *Subject:* {e['subject']}")
 
-        # Build Slack notification
-        lines = [f"📬 *{len(new_emails)} new unread email(s) in your inbox:*\n"]
-        for e in new_emails:
-            lines.append(f"• *From:* {e['from']} | *Subject:* {e['subject']}")
+            try:
+                slack_client.chat_postMessage(
+                    channel=autonomous_channel_id,
+                    text="\n".join(lines),
+                    mrkdwn=True,
+                )
+                logger.info(f"[inbox_checker] Notified {len(new_emails)} new emails.")
+                log("inbox_checker", f"{len(new_emails)} new unread email(s) found", "✅")
+            except Exception as e:
+                logger.error(f"[inbox_checker] Slack post failed: {e}")
+                log("inbox_checker", "Failed to post inbox notification", "❌")
+        else:
+            logger.info("[inbox_checker] All new emails were from watched senders — skipping inbox notification.")
 
-        notify_text = "\n".join(lines)
-
-        try:
-            slack_client.chat_postMessage(
-                channel=autonomous_channel_id,
-                text=notify_text,
-                mrkdwn=True,
-            )
-            logger.info(f"[inbox_checker] Notified {len(new_emails)} new emails.")
-            log("inbox_checker", f"{len(new_emails)} new unread email(s) found", "✅")
-        except Exception as e:
-            logger.error(f"[inbox_checker] Slack post failed: {e}")
-            log("inbox_checker", "Failed to post inbox notification", "❌")
-
-        # Update last_seen_ids to current full set
+        # Always update last_seen_ids to the current full set
         settings["inbox_check"]["last_seen_ids"] = list(current_ids)[:50]
         save_settings(settings)
 
     except Exception as e:
         logger.error(f"[inbox_checker] Error: {e}")
         log("inbox_checker", f"Inbox check failed: {e}", "❌")
+
+
+def _extract_email_address(from_header: str) -> str:
+    """
+    Extract the raw email address from a From header.
+    Handles both 'Name <email@domain.com>' and 'email@domain.com' formats.
+    """
+    import re
+    match = re.search(r"<([^>]+)>", from_header)
+    if match:
+        return match.group(1).strip()
+    return from_header.strip()
