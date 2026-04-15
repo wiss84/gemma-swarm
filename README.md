@@ -33,6 +33,11 @@ All with human-in-the-loop approvals before sensitive actions (email sends, Link
 
 ---
 
+## Not Home? 
+No worries, We got you. Download slack app on your phone and stay in Control from anywhere.
+
+---
+
 ## Why Gemma Swarm?
 
 ✅ **Completely Free** — No API fees, no paid tiers, no credit card  

@@ -42,7 +42,7 @@ MODELS = {
     "supervisor":        "gemma-4-31b-it",    # Upgraded: best reasoning for orchestration
     "planner":           "gemma-3-27b-it",
     "researcher":        "gemma-3-27b-it",
-    "deep_researcher":   "gemma-3-27b-it",
+    "deep_researcher":   "gemma-4-26b-a4b-it",
     "email_composer":    "gemma-3-4b-it",
     "linkedin_composer": "gemma-3n-e4b-it",
     "task_classifier":   "gemma-3-27b-it",
@@ -52,6 +52,15 @@ MODELS = {
     "calendar_agent":    "gemma-3-4b-it",
     "docs_agent":        "gemma-3-4b-it",
     "sheets_agent":      "gemma-3-4b-it",
+    # ── Coding Agent ──────────────────────────────────────────────────────────
+    # All roles use gemma-4-31b-it: best reasoning + current training cutoff.
+    # gemma-3-27b-it is intentionally excluded — its early-2024 cutoff means
+    # it will confidently generate stale API calls for packages like LangChain.
+    "coding_agent":      "gemma-4-31b-it",
+    "coding_research":   "gemma-4-31b-it",
+    "coding_refactor":   "gemma-4-26b-a4b-it",
+    "coding_test":       "gemma-4-26b-a4b-it",
+    "coding_review":     "gemma-4-26b-a4b-it",
 }
 
 # ── Model Context Windows ──────────────────────────────────────────────────────
@@ -82,6 +91,12 @@ MAX_RETRIES = {
     "calendar_agent":    3,
     "docs_agent":        3,
     "sheets_agent":      3,
+    # ── Coding Agent ──────────────────────────────────────────────────────────
+    "coding_agent":      5,
+    "coding_research":   3,
+    "coding_refactor":   3,
+    "coding_test":       3,
+    "coding_review":     3,
 }
 
 MAX_RETRIES_SERVICE_UNAVAILABLE = {
@@ -93,7 +108,19 @@ MAX_RETRY_FAILS = 5
 
 # ── Tool Call Limit ────────────────────────────────────────────────────────────
 
+# Global default for all agents.
 MAX_TOOL_ITERATIONS = 15
+
+# Per-agent overrides for coding agent roles.
+# The main coding agent needs more steps for complex tasks (research → write → validate → fix).
+# Subagents are scoped so they stay lower.
+CODING_MAX_TOOL_ITERATIONS = {
+    "coding_agent":    30,
+    "coding_research": 10,
+    "coding_refactor": 15,
+    "coding_test":     15,
+    "coding_review":   10,
+}
 
 # ── Context Window Thresholds ──────────────────────────────────────────────────
 
@@ -131,6 +158,12 @@ LABEL = {
     "system":                "[SYSTEM]",
     "confirmation":          "[AWAITING YOUR CONFIRMATION]",
     "tool_result":           "[TOOL RESULT]",
+    # ── Coding Agent ──────────────────────────────────────────────────────────
+    "coding_agent":          "[CODING AGENT]",
+    "coding_research":       "[RESEARCH SUBAGENT]",
+    "coding_refactor":       "[REFACTOR SUBAGENT]",
+    "coding_test":           "[TEST SUBAGENT]",
+    "coding_review":         "[REVIEW SUBAGENT]",
 }
 
 # ── Guard Rails — Blocked Patterns ────────────────────────────────────────────
