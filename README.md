@@ -10,6 +10,13 @@ Built on **Google's Gemma models** (free tier) and powered by completely free in
 
 ---
 
+## Video Demos
+
+- 📧 **Email Workflow** — Compose, get feedback, send with interrupts: https://youtu.be/LfiQYaT1l9Q
+- 🤖 **Autonomous Mode** — Background research & LinkedIn posting: https://youtu.be/u5iaSv6Hi2U
+
+---
+
 ## What You Can Do (In Slack)
 
 💬 **Ask a question** → The bot researches it instantly and posts findings  
@@ -40,26 +47,82 @@ All with human-in-the-loop approvals before sensitive actions (email sends, Link
 
 ## Quick Start
 
-### 1. Download & Install
+### 1. Download
 ```bash
 # Clone the repo
 git clone https://github.com/yourusername/gemma-swarm.git
-cd gemma-swarm
-
-# Windows: Double-click setup.bat (auto-installs everything)
-# OR manual: pip install -r requirements.txt
-pip install -r requirements.txt
 ```
 
-### 2. Get API Keys (Free)
-- [Google Gemma API](https://aistudio.google.com/u/0/api-keys) — free tier
-- [Jina AI](https://jina.ai/) — no signup needed
-- Create `.env` file with keys (see Environment Variables below)
+### 2. Get Free API Keys (30-40 minutes 1 time setup)
 
-### 3. Connect to Slack
-- Follow [SLACK_WORKFLOW_SETUP.md](SLACK_WORKFLOW_SETUP.md) — 5 minutes
-- Run `python slack_app.py`
-- Mention the bot in any channel
+| Service | Required | Setup Guide |
+|---------|----------|-------------|
+| Google Gemma API | ✅ Yes | [Get API Key](https://aistudio.google.com/u/0/api-keys) |
+| Jina AI (web search) | ✅ Yes | [Get API Key](https://jina.ai/) — no signup required |
+| Slack | ✅ Yes | [Slack Workflow Setup](SLACK_WORKFLOW_SETUP.md) |
+| Gmail (email sending) | ✅ Yes | [Email Workflow Setup](Email_WORKFLOW_SETUP.md) |
+| LinkedIn (posting) | ✅ Yes | [LinkedIn Workflow Setup](LINKEDIN_WORKFLOW_SETUP.md) |
+| Google Workspace | ✅ Yes | [Google Workflow Setup](Google_WORKFLOW_SETUP.md) |
+
+### 3. Environment Variables
+
+Create a `.env` file in the project root:
+
+```bash
+# Google Gemma API (required)
+GOOGLE_API_KEY=your_google_api_key
+
+# Jina AI — web search (required)
+JINA_API_KEY=your_jina_api_key
+
+# Slack (required)
+Bot_User_OAuth_Token=xoxb-your-bot-token
+agent_socket_token=xapp-your-socket-token
+
+# Gmail — email sending (required)
+HUMAN_EMAIL=your_email@gmail.com
+EMAIL_PASSWORD=your_gmail_app_password
+
+# LinkedIn — posting (required)
+LINKEDIN_CLIENT_ID=your_linkedin_client_id
+LINKEDIN_CLIENT_SECRET=your_linkedin_client_secret
+
+# Google Workspace — OAuth credentials (required)
+# Place Google_creds.json in project root (see Google_WORKFLOW_SETUP.md)
+
+# LangSmith — tracing (optional, for debugging)
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=your_langsmith_api_key
+LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+LANGCHAIN_PROJECT=gemma-swarm
+```
+
+### 4. Install
+
+#### Option 1 — Windows (Easiest)
+
+Double-click **`setup.bat`**. It will automatically:
+1. Detect or install Miniconda
+2. Create a `gemma_swarm` Conda environment with Python 3.11
+3. Install all dependencies from `requirements.txt`
+4. Create a `gemma-swarm.bat` launcher with your paths pre-configured
+5. Place a desktop shortcut with a custom icon
+
+After setup completes, click the desktop shortcut to start the app.
+
+#### Option 2 — Manual (All Platforms)
+
+```bash
+# Create and activate a virtual environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the app
+python slack_app.py
+```
 
 **→ Done. Start chatting.**
 
@@ -71,8 +134,8 @@ Every component was deliberately chosen to avoid costs:
 
 | Component | Free Tier |
 |-----------|-----------|
-| **Gemma models** | Google Gemini API free tier — 15k tokens/min |
-| **Web research** | Jina AI — free with API key |
+| **Gemma models** | Google Gemini API free tier — 15k-265k tokens/min |
+| **Web research** | Free web fetch fallback → Jina AI — free with API key |
 | **Email** | Gmail SMTP — free with App Password |
 | **LinkedIn** | LinkedIn API — free with developer app |
 | **Google Workspace** | Gmail, Calendar, Docs, Sheets APIs — free with OAuth |
@@ -94,13 +157,6 @@ Run scheduling tasks in the background without Slack interaction:
 📊 **Activity Logging** — All autonomous actions logged to a Google Sheet
 
 Configure via the **Autonomous Settings** button in the Slack workspace menu.
-
----
-
-## Video Demos
-
-- 📧 **Email Workflow** — Compose, get feedback, send with interrupts: https://youtu.be/LfiQYaT1l9Q
-- 🤖 **Autonomous Mode** — Background research & LinkedIn posting: https://youtu.be/u5iaSv6Hi2U
 
 ---
 
@@ -173,7 +229,7 @@ Task Classifier
 
 | Agent | Model | Purpose |
 |-------|-------|---------|
-| Supervisor | gemma-3-27b-it | Orchestrates tasks, routes to agents, synthesises results |
+| Supervisor | gemma-4-31b-it | Orchestrates tasks, routes to agents, synthesises results |
 | Planner | gemma-3-27b-it | Breaks complex requests into ordered subtasks |
 | Researcher | gemma-3-12b-it | Quick web search — news, facts, prices |
 | Deep Researcher | gemma-3-12b-it | Full page reading — documentation, technical articles, URLs |
@@ -184,93 +240,12 @@ Task Classifier
 | Docs Agent | gemma-3-4b-it | Creates and edits Google Docs |
 | Sheets Agent | gemma-3-4b-it | Creates and manages Google Sheets |
 | Task Classifier | gemma-3-27b-it | Determines if a request is simple or multi-step |
-| Memory | gemma-3-4b-it | Rolling context compression (only runs at threshold) |
+| Memory | gemma-4-31b-it | Rolling context compression (only runs at threshold) |
 | Validator | gemma-3-4b-it | Validates supervisor response before delivery |
 
 ### Why Gemma Models?
 
 Every message in the pipeline — system prompts, agent results, tool outputs, and user messages — is wrapped as a `HumanMessage` with a label prefix (e.g. `[SUPERVISOR]`, `[RESEARCHER RESULT]`, `[HUMAN]`). This works because **Gemma models are instruction-tuned** and reliably understand the `human` role. Unlike other models that support distinct `system`, `assistant`, and `user` roles, this label-based approach reduces confusion and works better with Gemma's training.
-
----
-
-## Full Setup Guide
-
-### Prerequisites
-
-API keys for the services you want to use:
-
-| Service | Required | Setup Guide |
-|---------|----------|-------------|
-| Google Gemma API | ✅ Yes | [Get API Key](https://aistudio.google.com/u/0/api-keys) |
-| Jina AI (web search) | ✅ Yes | [Get API Key](https://jina.ai/) — no signup required |
-| Slack | ✅ Yes | [Slack Workflow Setup](SLACK_WORKFLOW_SETUP.md) |
-| Gmail (email sending) | ✅ Yes | [Email Workflow Setup](Email_WORKFLOW_SETUP.md) |
-| LinkedIn (posting) | ✅ Yes | [LinkedIn Workflow Setup](LINKEDIN_WORKFLOW_SETUP.md) |
-| Google Workspace | ✅ Yes | [Google Workflow Setup](Google_WORKFLOW_SETUP.md) |
-
----
-
-### Installation
-
-#### Option 1 — Windows (Easiest)
-
-Double-click **`setup.bat`**. It will automatically:
-1. Detect or install Miniconda
-2. Create a `gemma_swarm` Conda environment with Python 3.11
-3. Install all dependencies from `requirements.txt`
-4. Create a `gemma-swarm.bat` launcher with your paths pre-configured
-5. Place a desktop shortcut with a custom icon
-
-After setup completes, click the desktop shortcut to start the app.
-
-#### Option 2 — Manual (All Platforms)
-
-```bash
-# Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the app
-python slack_app.py
-```
-
----
-
-### Environment Variables
-
-Create a `.env` file in the project root:
-
-```bash
-# Google Gemma API (required)
-GOOGLE_API_KEY=your_google_api_key
-
-# Jina AI — web search (required)
-JINA_API_KEY=your_jina_api_key
-
-# Slack (required)
-Bot_User_OAuth_Token=xoxb-your-bot-token
-agent_socket_token=xapp-your-socket-token
-
-# Gmail — email sending (required)
-HUMAN_EMAIL=your_email@gmail.com
-EMAIL_PASSWORD=your_gmail_app_password
-
-# LinkedIn — posting (required)
-LINKEDIN_CLIENT_ID=your_linkedin_client_id
-LINKEDIN_CLIENT_SECRET=your_linkedin_client_secret
-
-# Google Workspace — OAuth credentials (required)
-# Place Google_creds.json in project root (see Google_WORKFLOW_SETUP.md)
-
-# LangSmith — tracing (optional, for debugging)
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=your_langsmith_api_key
-LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
-LANGCHAIN_PROJECT=gemma-swarm
-```
 
 ---
 
