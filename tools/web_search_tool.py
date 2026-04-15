@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 SEARCH_MAX_RESULTS = 20
 FETCH_TIMEOUT      = 20
 JINA_READER_URL    = "https://r.jina.ai/"
-MAX_PAGE_CHARS     = 40000
-CHUNK_SIZE         = 10000
+MAX_PAGE_CHARS     = 120000
+CHUNK_SIZE         = 40000
 
 # ── In-memory chunk store ──────────────────────────────────────────────────────
 

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 SLEEP_BETWEEN_CALLS = 30
 MAX_FETCH_URLS      = 3
-FETCH_CHAR_LIMIT    = 10000
+FETCH_CHAR_LIMIT    = 40000
 
 
 def run(slack_client, autonomous_channel_id: str) -> list[dict]:
@@ -164,9 +164,11 @@ Your job: Write a clear, structured research summary with these exact sections:
 - trend 1
 - trend 2
 - trend 3
+- trend 4
+- trend 5
 
 ## Notable Developments
-Write 2-3 paragraphs here.
+Write 5-6 paragraphs here.
 
 ## Sources
 - https://source1.com
