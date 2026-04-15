@@ -21,7 +21,7 @@ from langchain_core.messages import HumanMessage
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME      = "gemma-3-27b-it" #"gemini-3.1-flash-lite-preview"
+MODEL_NAME      = "gemma-3-27b-it"
 MIN_CALL_GAP_S  = 5   # seconds between calls — keeps well under 15 RPM
 
 _llm            = None
