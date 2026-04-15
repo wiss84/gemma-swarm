@@ -217,7 +217,7 @@ def fire_due_notifications(slack_client, autonomous_channel_id: str):
         if location:
             lines.append(f"📍 {location}")
         if desc:
-            lines.append(f"📝 {desc[:200]}")
+            lines.append(f"📝 {_format_description(desc)}")
 
         try:
             slack_client.chat_postMessage(
@@ -276,3 +276,21 @@ def _format_minutes(minutes: int) -> str:
     if remaining == 0:
         return f"{hours} hour{'s' if hours > 1 else ''}"
     return f"{hours}h {remaining}m"
+
+
+def _format_description(desc: str) -> str:
+    """Convert HTML in calendar description to Slack-flavored markdown."""
+    import re
+    desc = re.sub(r'<br\s*/?>', '\n', desc, flags=re.IGNORECASE)
+    desc = re.sub(r'</br>', '', desc, flags=re.IGNORECASE)
+    desc = re.sub(r'<b>|</b>', '*', desc)
+    desc = re.sub(r'<strong>|</strong>', '*', desc)
+    desc = re.sub(r'<i>|</i>', '_', desc)
+    desc = re.sub(r'<em>|</em>', '_', desc)
+    desc = re.sub(r'<a\s+href="([^"]+)"[^>]*>([^<]*)</a>', r'<\1|\2>', desc)
+    desc = re.sub(r'<[^>]+>', '', desc)
+    desc = desc.replace('&nbsp;', ' ')
+    desc = desc.replace('&amp;', '&')
+    desc = desc.replace('&lt;', '<')
+    desc = desc.replace('&gt;', '>')
+    return desc[:1000]

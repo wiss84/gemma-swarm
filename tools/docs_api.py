@@ -5,7 +5,7 @@ Google Docs API functions for creating, reading, and updating documents.
 Uses OAuth helpers from google_api.py.
 
 docs_create           — creates a doc with plain text
-docs_create_formatted — creates a doc with proper heading/bold/bullet formatting
+docs_create_formatted — creates a doc with proper heading/bold/bullet/code formatting
 docs_read             — reads a doc and returns plain text
 docs_update           — replaces all content with plain text
 docs_update_formatted — replaces all content with proper formatting applied
@@ -179,14 +179,24 @@ def _parse_lines(content: str) -> list[dict]:
     Each dict has:
       text       — plain text to insert (stars stripped)
       type       — one of: heading2, heading3, bullet, bullet_bold_title,
-                   numbered, bold_line, normal
+                   numbered, bold_line, code_block, normal
       bold_end   — (bullet_bold_title only) character offset within text where
                    the bold portion ends (i.e. length of "Title: ")
     """
-    lines = []
+    lines         = []
+    in_code_block = False
 
     for raw_line in content.split("\n"):
         stripped = raw_line.rstrip()
+
+        # Fenced code block toggle (``` or ```python etc)
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue  # don't insert the fence line itself
+
+        if in_code_block:
+            lines.append({"text": raw_line.rstrip("\r"), "type": "code_block"})
+            continue
 
         # ## Heading 2
         if stripped.startswith("## "):
@@ -326,6 +336,23 @@ def _build_format_requests(lines: list[dict]) -> list[dict]:
                 "createParagraphBullets": {
                     "range":        {"startIndex": index, "endIndex": end_index},
                     "bulletPreset": "NUMBERED_DECIMAL_ALPHA_ROMAN",
+                }
+            })
+
+        elif line_type == "code_block":
+            requests_list.append({
+                "updateTextStyle": {
+                    "range": {"startIndex": index, "endIndex": end_index},
+                    "textStyle": {
+                        "weightedFontFamily": {"fontFamily": "Courier New"},
+                        "fontSize":           {"magnitude": 10, "unit": "PT"},
+                        "backgroundColor":   {
+                            "color": {
+                                "rgbColor": {"red": 0.937, "green": 0.937, "blue": 0.937}
+                            }
+                        },
+                    },
+                    "fields": "weightedFontFamily,fontSize,backgroundColor",
                 }
             })
 
