@@ -12,6 +12,13 @@ Memory isolation per agent type:
 - task_classifier: sees only the latest human message
 - validator:      sees only supervisor messages
 - memory:         sees supervisor messages only (what it needs to compress)
+
+Tool calling strategy (two code paths):
+- Gemma 4 / Gemini: native function calling via llm.bind_tools().
+  Tools are registered through the API's tools parameter (no prompt tokens consumed).
+  Model returns AIMessage with tool_calls list; results fed back as ToolMessage.
+- Gemma 3: text-JSON loop. Tools schema serialized into the system prompt as JSON.
+  Model returns {"tool": "...", "args": {...}} text; results fed back as HumanMessage.
 """
 
 import os
@@ -20,7 +27,7 @@ import re
 import logging
 from abc import ABC, abstractmethod
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from agents_utils.config import MODELS, LABEL, MAX_TOOL_ITERATIONS
 from agents_utils.rate_limit_handler import RateLimitHandler
@@ -29,25 +36,33 @@ from agents_utils.json_parser import _extract_json
 logger = logging.getLogger(__name__)
 
 
+# ── Model capability helpers ───────────────────────────────────────────────────
+
 def _supports_system_message(model_name: str) -> bool:
     """
-    Return True if this model supports a dedicated system role.
-    Gemma 4 and all Gemini models support SystemMessage.
-    Gemma 3 and earlier do not — the system prompt must be injected
-    as the first HumanMessage instead.
+    Gemma 4 and Gemini support a dedicated system role (SystemMessage).
+    Gemma 3 and earlier do not — system prompt goes in as the first HumanMessage.
     """
     return model_name.startswith("gemma-4-") or model_name.startswith("gemini-")
 
-# Agents that use their own independent history
-INDEPENDENT_HISTORY_AGENTS = {"researcher", "deep_researcher", "email_composer", "linkedin_composer", "gmail_agent", "calendar_agent", "docs_agent", "sheets_agent"}
 
-# Agents that see only the latest human message
+def _supports_native_tools(model_name: str) -> bool:
+    """
+    Gemma 4 and Gemini support native function calling via the API tools parameter.
+    Gemma 3 uses the text-JSON loop instead.
+    """
+    return model_name.startswith("gemma-4-") or model_name.startswith("gemini-")
+
+
+# ── Agent sets for message filtering ──────────────────────────────────────────
+
+INDEPENDENT_HISTORY_AGENTS = {
+    "researcher", "deep_researcher", "email_composer", "linkedin_composer",
+    "gmail_agent", "calendar_agent", "docs_agent", "sheets_agent",
+}
 LATEST_HUMAN_ONLY_AGENTS = {"planner", "task_classifier"}
+FULL_CONTEXT_AGENTS      = {"supervisor"}
 
-# Agents that see everything
-FULL_CONTEXT_AGENTS = {"supervisor"}
-
-# Map agent name to its history field in state
 AGENT_HISTORY_FIELD = {
     "researcher":        "researcher_history",
     "deep_researcher":   "deep_researcher_history",
@@ -61,14 +76,7 @@ AGENT_HISTORY_FIELD = {
 
 
 def _filter_messages_for_agent(agent_name: str, messages: list, state: dict = None) -> list:
-    """
-    Return the correct message list for each agent type.
-
-    - supervisor: full shared messages list
-    - planner/classifier: only latest human message
-    - researcher/email/linkedin/deep_researcher: their own independent history
-    - others (memory, validator): full messages list
-    """
+    """Return the correct message slice for each agent type."""
     if agent_name in FULL_CONTEXT_AGENTS:
         return messages
 
@@ -81,13 +89,11 @@ def _filter_messages_for_agent(agent_name: str, messages: list, state: dict = No
         return messages[-1:] if messages else []
 
     if agent_name in INDEPENDENT_HISTORY_AGENTS:
-        # Use agent's own history from state
         if state:
             history_field = AGENT_HISTORY_FIELD.get(agent_name, "")
             agent_history = state.get(history_field, [])
             if agent_history:
                 return agent_history
-        # Fallback: extract only supervisor messages if no history yet
         filtered = []
         for msg in messages:
             if isinstance(msg, HumanMessage):
@@ -98,6 +104,8 @@ def _filter_messages_for_agent(agent_name: str, messages: list, state: dict = No
 
     return messages
 
+
+# ── BaseAgent ─────────────────────────────────────────────────────────────────
 
 class BaseAgent(ABC):
 
@@ -116,6 +124,10 @@ class BaseAgent(ABC):
         self.tools: list[BaseTool] = []
         self.tool_registry: dict   = {}
 
+        # llm_with_tools is set by register_tools() for Gemma 4 / Gemini agents.
+        # For Gemma 3 agents it stays None and the text-JSON path is used instead.
+        self.llm_with_tools = None
+
         logger.info(f"[{self.agent_name}] Initialized: {self.model_name}")
 
     @abstractmethod
@@ -125,6 +137,20 @@ class BaseAgent(ABC):
     def register_tools(self, tools: list[BaseTool]):
         self.tools         = tools
         self.tool_registry = {t.name: t for t in tools}
+
+        if _supports_native_tools(self.model_name) and tools:
+            # Gemma 4 / Gemini: bind tools to the LLM via the API's native tools parameter.
+            # This means tools are NOT injected into the prompt — zero prompt tokens spent.
+            self.llm_with_tools = self.llm.bind_tools(tools)
+            logger.info(
+                f"[{self.agent_name}] Native tool calling enabled "
+                f"({len(tools)} tools bound via API)."
+            )
+        else:
+            # Gemma 3: text-JSON loop, tools schema injected into system prompt.
+            self.llm_with_tools = None
+
+    # ── Schema builder (Gemma 3 text-JSON path only) ──────────────────────────
 
     def _build_tools_schema(self) -> list[dict]:
         return [
@@ -136,6 +162,8 @@ class BaseAgent(ABC):
             for t in self.tools
         ]
 
+    # ── Shared helpers ────────────────────────────────────────────────────────
+
     def _extract_json(self, text: str) -> dict | None:
         return _extract_json(text)
 
@@ -145,10 +173,8 @@ class BaseAgent(ABC):
     def _is_agent_response(self, parsed: dict) -> bool:
         return "response" in parsed
 
-    def _execute_tool(self, tool_call: dict) -> str:
-        tool_name = tool_call.get("tool")
-        tool_args = tool_call.get("args", {})
-        tool_fn   = self.tool_registry.get(tool_name)
+    def _execute_tool(self, tool_name: str, tool_args: dict) -> str:
+        tool_fn = self.tool_registry.get(tool_name)
         if tool_fn is None:
             return f"Error: Unknown tool '{tool_name}'"
         try:
@@ -159,15 +185,8 @@ class BaseAgent(ABC):
 
     def _extract_response_content(self, response) -> str:
         """
-        Extract text content from LLM response.
-
-        Handles three response structures:
-        - str: plain Gemma 3 response
-        - list with mixed blocks: Gemma 4 thinking mode response.
-          Blocks have a 'type' field — we skip 'thinking' blocks and
-          concatenate all 'text' blocks.
-        - list with dict blocks (no 'type'): older Gemini-style content blocks
-          with a 'text' key directly.
+        Extract plain text from an LLM response object.
+        Handles Gemma 4 thinking blocks, Gemini content lists, and plain strings.
         """
         content = response.content
 
@@ -175,8 +194,6 @@ class BaseAgent(ABC):
             return content
 
         if isinstance(content, list) and len(content) > 0:
-            # Gemma 4 thinking mode: list of {'type': 'thinking'/'text', ...} dicts
-            # Collect only text blocks, skip thinking blocks entirely
             text_parts = []
             for block in content:
                 if isinstance(block, dict):
@@ -184,36 +201,34 @@ class BaseAgent(ABC):
                     if block_type == "text":
                         text_parts.append(block.get("text", ""))
                     elif block_type == "thinking":
-                        # Silently discard — thinking is internal reasoning,
-                        # not meant to be shown to the user or parsed as JSON
-                        continue
+                        continue  # discard internal reasoning
                     elif "text" in block:
-                        # Older Gemini-style block with no 'type' key
                         text_parts.append(block["text"])
-
             if text_parts:
                 return "".join(text_parts)
-
-            # Nothing useful found — fall back to string representation
             return str(content)
 
         return str(content)
 
-    def _call_llm(self, messages: list) -> AIMessage:
-        # Estimate tokens across all messages.
-        # For coding agents the tools schema dominates — JSON is more
-        # token-dense than prose (~3 chars/token vs ~4), so we use
-        # a tighter divisor (3.5) and add a larger buffer to stay safe.
+    def _call_llm(self, messages: list, use_tools: bool = False) -> AIMessage:
+        """
+        Call the LLM and track tokens for rate limiting.
+        use_tools=True selects llm_with_tools (Gemma 4 native path).
+        """
         total_chars = sum(
             len(m.content) if isinstance(m.content, str) else len(str(m.content))
             for m in messages
         )
-        char_divisor = 3.5 if len(self.tools) > 10 else 4.0
+        # Native tool calling: tools aren't in the prompt so standard divisor is fine.
+        # Text-JSON loop: tool schemas inflate the prompt, use tighter divisor.
+        char_divisor = 4.0 if (use_tools or len(self.tools) <= 10) else 3.5
         input_tokens = max(1, int(total_chars / char_divisor))
-        estimated    = input_tokens + 1500  # buffer covers output tokens
+        estimated    = input_tokens + 1500
+
+        llm_target = self.llm_with_tools if use_tools else self.llm
 
         response = self.rate_limiter.call_with_retry(
-            self.llm.invoke,
+            llm_target.invoke,
             messages,
             estimated_tokens=estimated,
             input_tokens=input_tokens,
@@ -223,6 +238,144 @@ class BaseAgent(ABC):
         logger.debug(f"[{self.agent_name}] Response: {raw[:100]}")
         return response
 
+    # ── Native tool loop (Gemma 4 / Gemini) ──────────────────────────────────
+
+    def _run_native_tool_loop(
+        self,
+        llm_messages: list,
+        max_tool_iterations: int,
+    ) -> tuple[str, dict | None]:
+        """
+        Tool loop for Gemma 4 / Gemini using native function calling.
+
+        Conversation structure:
+          SystemMessage(system_prompt)          ← system role, no prompt tokens
+          HumanMessage(user task)               ← user turn
+          AIMessage(tool_calls=[...])           ← model requests tool(s)
+          ToolMessage(content, tool_call_id)    ← tool result(s)
+          AIMessage(tool_calls=[...])           ← model requests more tools / final answer
+          ...
+          AIMessage(content="final response")   ← no tool_calls → we're done
+        """
+        consecutive_empty = 0
+
+        for iteration in range(max_tool_iterations):
+            response = self._call_llm(llm_messages, use_tools=True)
+            raw_text = self._extract_response_content(response)
+
+            # Check for native tool_calls on the response object
+            tool_calls = getattr(response, "tool_calls", None)
+
+            if tool_calls:
+                # Model issued one or more tool calls — execute each and feed results back
+                llm_messages.append(response)  # append full AIMessage with tool_calls
+
+                for tc in tool_calls:
+                    tool_name = tc.get("name", "")
+                    tool_args = tc.get("args", {})
+                    tool_id   = tc.get("id", tool_name)
+
+                    logger.info(f"[{self.agent_name}] Tool call (native): {tool_name}")
+                    tool_result = self._execute_tool(tool_name, tool_args)
+                    logger.info(f"[{self.agent_name}] Tool result: {tool_result[:100]}")
+
+                    llm_messages.append(
+                        ToolMessage(content=tool_result, tool_call_id=tool_id)
+                    )
+                consecutive_empty = 0
+                continue
+
+            # No tool calls — model is producing a final response
+            if raw_text and raw_text.strip():
+                consecutive_empty = 0
+                return raw_text.strip(), None
+
+            # Empty response — nudge once, then keep going
+            consecutive_empty += 1
+            if consecutive_empty <= 3:
+                logger.warning(
+                    f"[{self.agent_name}] Empty response on iteration {iteration} "
+                    f"(consecutive: {consecutive_empty}). Nudging."
+                )
+                llm_messages.append(HumanMessage(content="Please continue."))
+            else:
+                logger.error(
+                    f"[{self.agent_name}] {consecutive_empty} consecutive empty responses. Stopping."
+                )
+                break
+
+        logger.warning(f"[{self.agent_name}] Native tool loop: max iterations reached.")
+        return "Max tool iterations reached without a final response.", None
+
+    # ── Text-JSON tool loop (Gemma 3) ─────────────────────────────────────────
+
+    def _run_text_json_tool_loop(
+        self,
+        llm_messages: list,
+        max_tool_iterations: int,
+    ) -> tuple[str, dict | None]:
+        """
+        Tool loop for Gemma 3 using the text-JSON pattern.
+        The model returns {"tool": "...", "args": {...}} or {"response": "..."}.
+        Tool results are fed back as HumanMessage.
+        """
+        consecutive_empty = 0
+
+        for iteration in range(max_tool_iterations):
+            response = self._call_llm(llm_messages, use_tools=False)
+            raw_text = self._extract_response_content(response)
+
+            parsed = self._extract_json(raw_text)
+
+            if parsed and self._is_tool_call(parsed):
+                tool_name = parsed.get("tool")
+                tool_args = parsed.get("args", {})
+                logger.info(f"[{self.agent_name}] Tool call (text-JSON): {tool_name}")
+                tool_result = self._execute_tool(tool_name, tool_args)
+                logger.info(f"[{self.agent_name}] Tool result: {tool_result[:100]}")
+                llm_messages.append(AIMessage(content=raw_text))
+                llm_messages.append(
+                    HumanMessage(
+                        content=f"{LABEL['tool_result']}\n{tool_result}\n\n"
+                                f"Now continue to the next step, or provide your response "
+                                f"based on this result, if there are no next steps."
+                    )
+                )
+                consecutive_empty = 0
+                continue
+
+            if parsed and self._is_agent_response(parsed):
+                response_text = parsed.get("response", raw_text)
+                if response_text and response_text.strip():
+                    return response_text.strip(), parsed
+                if raw_text and raw_text.strip():
+                    return raw_text.strip(), None
+                # Empty response body — treat as empty and fall through
+                raw_text = ""
+
+            if raw_text and raw_text.strip():
+                consecutive_empty = 0
+                return raw_text.strip(), None
+
+            # Empty response
+            consecutive_empty += 1
+            if consecutive_empty <= 3:
+                logger.warning(
+                    f"[{self.agent_name}] Empty response on iteration {iteration} "
+                    f"(consecutive: {consecutive_empty}). Nudging."
+                )
+                llm_messages.append(HumanMessage(content="Please continue."))
+            else:
+                logger.error(
+                    f"[{self.agent_name}] {consecutive_empty} consecutive empty responses. Stopping."
+                )
+                break
+
+        logger.warning(f"[{self.agent_name}] Text-JSON tool loop: max iterations reached.")
+        return "Max tool iterations reached without a final response.", None
+
+    # ── Public run() ─────────────────────────────────────────────────────────
+
     def run(
         self,
         messages: list,
@@ -231,21 +384,22 @@ class BaseAgent(ABC):
         state: dict = None,
     ) -> tuple[str, dict | None]:
         """
-        Run the agent with filtered message history.
-        Each agent uses its own independent history to avoid cross-contamination.
+        Run the agent. Selects native tool loop (Gemma 4/Gemini) or
+        text-JSON loop (Gemma 3) based on model family.
         """
         filtered_messages = _filter_messages_for_agent(self.agent_name, messages, state=state)
 
-        tools_schema_str = ""
-        if self.tools:
-            tools_schema_str = json.dumps(self._build_tools_schema(), indent=2)
-
         system_prompt = self.get_system_prompt()
-        if tools_schema_str:
-            system_prompt += f"\n\nAvailable tools:\n{tools_schema_str}"
 
-        # Gemma 4 and Gemini support a dedicated system role — use SystemMessage.
-        # Gemma 3 and earlier do not — inject as first HumanMessage instead.
+        use_native = _supports_native_tools(self.model_name) and bool(self.llm_with_tools)
+
+        if not use_native:
+            # Gemma 3: inject tools schema into the system prompt as text
+            if self.tools:
+                tools_schema_str = json.dumps(self._build_tools_schema(), indent=2)
+                system_prompt += f"\n\nAvailable tools:\n{tools_schema_str}"
+
+        # Build initial message list
         if _supports_system_message(self.model_name):
             llm_messages = [SystemMessage(content=system_prompt)]
         else:
@@ -256,41 +410,8 @@ class BaseAgent(ABC):
 
         llm_messages.extend(filtered_messages)
 
-        for iteration in range(max_tool_iterations):
-            response = self._call_llm(llm_messages)
-            raw_text = self._extract_response_content(response)
-
-            parsed = self._extract_json(raw_text)
-
-            if parsed and self._is_tool_call(parsed):
-                logger.info(f"[{self.agent_name}] Tool call: {parsed.get('tool')}")
-                tool_result = self._execute_tool(parsed)
-                logger.info(f"[{self.agent_name}] Tool result: {tool_result[:100]}")
-                llm_messages.append(AIMessage(content=raw_text))
-                llm_messages.append(
-                    HumanMessage(
-                        content=f"{LABEL['tool_result']}\n{tool_result}\n\n"
-                                f"Now provide your response based on this result."
-                    )
-                )
-                continue
-
-            if parsed and self._is_agent_response(parsed):
-                response_text = parsed.get("response", raw_text)
-                # Guard: never return a blank response — fall through to raw_text
-                if response_text and response_text.strip():
-                    return response_text.strip(), parsed
-                if raw_text and raw_text.strip():
-                    return raw_text.strip(), None
-                # If both are empty, keep looping — the model gave us nothing
-                continue
-
-            if raw_text and raw_text.strip():
-                return raw_text.strip(), None
-            # Empty raw_text — nudge the model to give a response
-            llm_messages.append(
-                HumanMessage(content="Please provide your final response summary now.")
-            )
-
-        logger.warning(f"[{self.agent_name}] Max tool iterations reached.")
-        return "Max tool iterations reached without a final response.", None
+        # Route to the appropriate tool loop
+        if use_native:
+            return self._run_native_tool_loop(llm_messages, max_tool_iterations)
+        else:
+            return self._run_text_json_tool_loop(llm_messages, max_tool_iterations)
