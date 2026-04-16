@@ -20,13 +20,23 @@ import re
 import logging
 from abc import ABC, abstractmethod
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from agents_utils.config import MODELS, LABEL, MAX_TOOL_ITERATIONS
 from agents_utils.rate_limit_handler import RateLimitHandler
 from agents_utils.json_parser import _extract_json
 
 logger = logging.getLogger(__name__)
+
+
+def _supports_system_message(model_name: str) -> bool:
+    """
+    Return True if this model supports a dedicated system role.
+    Gemma 4 and all Gemini models support SystemMessage.
+    Gemma 3 and earlier do not — the system prompt must be injected
+    as the first HumanMessage instead.
+    """
+    return model_name.startswith("gemma-4-") or model_name.startswith("gemini-")
 
 # Agents that use their own independent history
 INDEPENDENT_HISTORY_AGENTS = {"researcher", "deep_researcher", "email_composer", "linkedin_composer", "gmail_agent", "calendar_agent", "docs_agent", "sheets_agent"}
@@ -190,13 +200,17 @@ class BaseAgent(ABC):
         return str(content)
 
     def _call_llm(self, messages: list) -> AIMessage:
-        input_tokens = RateLimitHandler.estimate_tokens(
-            " ".join(
-                m.content for m in messages
-                if isinstance(m.content, str)
-            )
+        # Estimate tokens across all messages.
+        # For coding agents the tools schema dominates — JSON is more
+        # token-dense than prose (~3 chars/token vs ~4), so we use
+        # a tighter divisor (3.5) and add a larger buffer to stay safe.
+        total_chars = sum(
+            len(m.content) if isinstance(m.content, str) else len(str(m.content))
+            for m in messages
         )
-        estimated = input_tokens + 1000
+        char_divisor = 3.5 if len(self.tools) > 10 else 4.0
+        input_tokens = max(1, int(total_chars / char_divisor))
+        estimated    = input_tokens + 1500  # buffer covers output tokens
 
         response = self.rate_limiter.call_with_retry(
             self.llm.invoke,
@@ -230,7 +244,12 @@ class BaseAgent(ABC):
         if tools_schema_str:
             system_prompt += f"\n\nAvailable tools:\n{tools_schema_str}"
 
-        llm_messages = [HumanMessage(content=system_prompt)]
+        # Gemma 4 and Gemini support a dedicated system role — use SystemMessage.
+        # Gemma 3 and earlier do not — inject as first HumanMessage instead.
+        if _supports_system_message(self.model_name):
+            llm_messages = [SystemMessage(content=system_prompt)]
+        else:
+            llm_messages = [HumanMessage(content=system_prompt)]
 
         if extra_context:
             llm_messages.append(HumanMessage(content=extra_context))
@@ -258,9 +277,20 @@ class BaseAgent(ABC):
 
             if parsed and self._is_agent_response(parsed):
                 response_text = parsed.get("response", raw_text)
-                return response_text, parsed
+                # Guard: never return a blank response — fall through to raw_text
+                if response_text and response_text.strip():
+                    return response_text.strip(), parsed
+                if raw_text and raw_text.strip():
+                    return raw_text.strip(), None
+                # If both are empty, keep looping — the model gave us nothing
+                continue
 
-            return raw_text.strip(), None
+            if raw_text and raw_text.strip():
+                return raw_text.strip(), None
+            # Empty raw_text — nudge the model to give a response
+            llm_messages.append(
+                HumanMessage(content="Please provide your final response summary now.")
+            )
 
         logger.warning(f"[{self.agent_name}] Max tool iterations reached.")
         return "Max tool iterations reached without a final response.", None
