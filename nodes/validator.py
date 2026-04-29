@@ -9,14 +9,13 @@ LLM validation always runs — never skipped.
 """
 
 import os
-import re
-import json
 import logging
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from agents_utils.state import AgentState
 from agents_utils.config import LABEL, MODELS
 from agents_utils.rate_limit_handler import RateLimitHandler
+from agents_utils.json_parser import _extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +37,29 @@ def _get_validator():
     return _validator_llm, _validator_limiter
 
 
+def _extract_response_text(response) -> str:
+    """
+    Extract plain text from a Gemma 4 LLM response, discarding thinking blocks.
+    Mirrors BaseAgent._extract_response_content().
+    """
+    content = response.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+                elif block.get("type") == "thinking":
+                    continue
+                elif "text" in block:
+                    text_parts.append(block["text"])
+        if text_parts:
+            return "".join(text_parts)
+    return str(content)
+
+
 def _python_checks(response_text: str) -> tuple[bool, str]:
     """Fast pre-checks before LLM validation."""
     if not response_text or len(response_text.strip()) < 5:
@@ -46,11 +68,9 @@ def _python_checks(response_text: str) -> tuple[bool, str]:
         return False, "Response contains a raw tool call — not a proper answer."
     stripped = response_text.strip()
     if stripped.startswith("{") and stripped.endswith("}"):
-        try:
-            json.loads(stripped)
+        parsed = _extract_json(stripped)
+        if parsed is not None:
             return False, "Response is raw JSON — not a proper natural language answer."
-        except json.JSONDecodeError:
-            pass
     return True, ""
 
 
@@ -66,7 +86,7 @@ def _llm_validate(task: str, response_text: str) -> tuple[bool, str]:
     from system_prompts.validator_prompt import get_prompt
     prompt = get_prompt(task, response_text)
 
-    estimated = RateLimitHandler.estimate_tokens(prompt)
+    estimated = RateLimitHandler.estimate_tokens(prompt) + 500
 
     try:
         result = limiter.call_with_retry(
@@ -74,22 +94,26 @@ def _llm_validate(task: str, response_text: str) -> tuple[bool, str]:
             [HumanMessage(content=prompt)],
             estimated_tokens=estimated,
         )
-        raw   = result.content if isinstance(result.content, str) else str(result.content)
-        match = re.search(r'\{.*?\}', raw, re.DOTALL)
-        if match:
-            parsed   = json.loads(match.group(0))
+        # Use shared helper to strip thinking blocks before parsing
+        raw    = _extract_response_text(result)
+        parsed = _extract_json(raw)
+
+        if parsed is not None:
             valid    = parsed.get("valid", True)
             feedback = parsed.get("feedback", "").strip()
-            # If invalid but no feedback provided — 1b model failed to explain why
-            # Treat as pass-through to avoid looping on empty reason
+            # If invalid but no feedback — model failed to explain why.
+            # Treat as pass-through to avoid looping on empty reason.
             if not valid and not feedback:
                 logger.warning("[validator] Model returned invalid with no feedback — passing through.")
                 return True, ""
-            return valid, feedback
+            return bool(valid), feedback
+
+        # Could not parse JSON at all — pass through rather than block
+        logger.warning(f"[validator] Could not parse validation response: {raw[:120]} — passing through.")
+
     except Exception as e:
         logger.warning(f"[validator] LLM validation error: {e} — passing through.")
 
-    # If validation itself errors, pass through to avoid blocking pipeline
     return True, ""
 
 

@@ -172,6 +172,18 @@ def docs_create_formatted(title: str, content: str, slack_post_fn=None) -> dict:
     return {"id": doc_id, "title": title, "link": link}
 
 
+def _strip_markdown_links(text: str) -> str:
+    """
+    Convert markdown links [label](url) to plain label text.
+    Also strips bare angle-bracket links <url> and reference-style links.
+    """
+    # [label](url) → label
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    # <url> → url
+    text = re.sub(r'<(https?://[^>]+)>', r'\1', text)
+    return text
+
+
 def _parse_lines(content: str) -> list[dict]:
     """
     Parse content into a list of structured line dicts.
@@ -198,21 +210,26 @@ def _parse_lines(content: str) -> list[dict]:
             lines.append({"text": raw_line.rstrip("\r"), "type": "code_block"})
             continue
 
+        # #### Heading 4 / ##### Heading 5 — collapse to Heading 3
+        if re.match(r'^#{4,}\s', stripped):
+            text = _strip_markdown_links(re.sub(r'^#{4,}\s+', '', stripped).strip())
+            lines.append({"text": text, "type": "heading3"})
+
         # ## Heading 2
-        if stripped.startswith("## "):
-            lines.append({"text": stripped[3:].strip(), "type": "heading2"})
+        elif stripped.startswith("## "):
+            lines.append({"text": _strip_markdown_links(stripped[3:].strip()), "type": "heading2"})
 
         # ### Heading 3
         elif stripped.startswith("### "):
-            lines.append({"text": stripped[4:].strip(), "type": "heading3"})
+            lines.append({"text": _strip_markdown_links(stripped[4:].strip()), "type": "heading3"})
 
         # DRAFT N: pattern
         elif re.match(r"^DRAFT\s+\d+\s*:", stripped, re.IGNORECASE):
-            lines.append({"text": stripped, "type": "heading2"})
+            lines.append({"text": _strip_markdown_links(stripped), "type": "heading2"})
 
         # Bullet list item
         elif stripped.startswith("- ") or stripped.startswith("• "):
-            text = stripped[2:].strip()
+            text = _strip_markdown_links(stripped[2:].strip())
 
             # Check for bold title prefix: **Title:** rest of text
             # Matches patterns like **Title:** or **Title -** or just **Title**
@@ -239,20 +256,21 @@ def _parse_lines(content: str) -> list[dict]:
 
         # Numbered list item (1. 2. etc)
         elif re.match(r"^\d+\.\s", stripped):
-            text = re.sub(r"^\d+\.\s+", "", stripped)
+            text = _strip_markdown_links(re.sub(r"^\d+\.\s+", "", stripped))
             lines.append({"text": text, "type": "numbered"})
 
         # Whole line is bold (**text**)
         elif stripped.startswith("**") and stripped.endswith("**") and len(stripped) > 4:
-            lines.append({"text": stripped[2:-2], "type": "bold_line"})
+            lines.append({"text": _strip_markdown_links(stripped[2:-2]), "type": "bold_line"})
 
         # Empty line
         elif stripped == "":
             lines.append({"text": "", "type": "normal"})
 
-        # Normal paragraph — strip inline ** markers
+        # Normal paragraph — strip inline ** markers and markdown links
         else:
             clean = re.sub(r"\*\*(.+?)\*\*", r"\1", stripped)
+            clean = _strip_markdown_links(clean)
             lines.append({"text": clean, "type": "normal"})
 
     return lines

@@ -33,13 +33,14 @@ from slack_utils.thread_state       import (
     get_threads_lock,
     get_threads_registry,
     load_registry_into_threads,
+    load_coding_registry_into_threads,
     STATUS_MESSAGES,
     post_status,
     delete_status,
     update_status,
 )
 from slack_utils.rate_callbacks     import register_wait_callbacks, clear_wait_callbacks
-from slack_utils.handlers_workspace import build_workspace_blocks
+from slack_utils.handlers_workspace import build_workspace_blocks, build_graph_selector_blocks
 from slack_utils.handlers_confirm   import register_confirm_handlers
 from slack_utils.handlers_linkedin  import register_linkedin_handlers
 from slack_utils.handlers_email     import register_email_handlers
@@ -49,6 +50,7 @@ from slack_utils.handlers_workspace import register_workspace_handlers
 from slack_utils.handlers_autonomous import register_autonomous_handlers
 from slack_utils.handlers_preferences import register_preferences_handlers
 from slack_utils.handlers_google    import register_google_handlers
+from slack_utils.handlers_coding    import register_coding_handlers, run_coding_session_slack
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
@@ -92,8 +94,10 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say):
         "recursion_limit": LANGGRAPH_RECURSION_LIMIT,
     }
 
-    status_ts       = post_status(client, channel, thread_ts, STATUS_MESSAGES["supervisor"])
-    state.status_ts = status_ts or ""
+    # Snapshot status_ts locally so the finally block always cleans up its OWN
+    # status message, even if a fresh-start overwrites state.status_ts first.
+    local_status_ts = post_status(client, channel, thread_ts, STATUS_MESSAGES["supervisor"]) or ""
+    state.status_ts = local_status_ts
 
     formatted_output = []
 
@@ -162,8 +166,8 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say):
             
             for node_name, node_output in chunk.items():
                 status_text = STATUS_MESSAGES.get(node_name)
-                if status_text and state.status_ts:
-                    update_status(client, channel, state.status_ts, status_text)
+                if status_text and local_status_ts:
+                    update_status(client, channel, local_status_ts, status_text)
 
                 if node_name == "output_formatter":
                     formatted_output = node_output.get("formatted_output", [])
@@ -175,19 +179,72 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say):
         formatted_output = [f"❌ An error occurred: {e}"]
 
     finally:
-        delete_status(client, channel, state.status_ts)
+        delete_status(client, channel, local_status_ts)
         clear_wait_callbacks()
         state.status_ts = ""
         state.active    = False
 
     if not state.cancel_event.is_set():
         if formatted_output:
-            for chunk in formatted_output:
+            # formatted_output is list[str | dict]:
+            #   str  → plain mrkdwn text chunk
+            #   dict → Slack Block Kit table block (paired with preceding text if any)
+            pending_text: str | None = None
+
+            for item in formatted_output:
+                if isinstance(item, dict):
+                    # Table block — send as its own message with a plain fallback.
+                    # Do NOT use pending_text as the text= field: Slack only shows
+                    # text= as notification fallback when blocks= is present, so
+                    # the preceding text chunk must be posted as a separate message.
+                    if pending_text is not None:
+                        logger.info(f"[slack] Posting intro: {len(pending_text)} chars")
+                        try:
+                            client.chat_postMessage(
+                                channel=channel,
+                                thread_ts=thread_ts,
+                                text=pending_text,
+                                mrkdwn=True,
+                            )
+                        except Exception as e:
+                            logger.error(f"[slack] Could not post chunk: {e}")
+                        pending_text = None
+                    logger.info(f"[slack] Posting table block")
+                    try:
+                        client.chat_postMessage(
+                            channel=channel,
+                            thread_ts=thread_ts,
+                            text="Table:",
+                            blocks=[item],
+                            mrkdwn=True,
+                        )
+                    except Exception as e:
+                        logger.error(f"[slack] Could not post table block: {e}")
+                else:
+                    # Text chunk — hold it; it may be followed by a table block
+                    if pending_text is not None:
+                        is_code = "```" in pending_text
+                        logger.info(f"[slack] Posting pending text: {len(pending_text)} chars, is_code={is_code}")
+                        try:
+                            client.chat_postMessage(
+                                channel=channel,
+                                thread_ts=thread_ts,
+                                text=pending_text,
+                                mrkdwn=True,
+                            )
+                        except Exception as e:
+                            logger.error(f"[slack] Could not post chunk: {e}")
+                    pending_text = item
+
+            # Flush any remaining text chunk not followed by a table
+            if pending_text is not None:
+                is_code = "```" in pending_text
+                logger.info(f"[slack] Flushing pending text: {len(pending_text)} chars, is_code={is_code}, preview: {pending_text[:80]!r}")
                 try:
                     client.chat_postMessage(
                         channel=channel,
                         thread_ts=thread_ts,
-                        text=chunk,
+                        text=pending_text,
                         mrkdwn=True,
                     )
                 except Exception as e:
@@ -365,6 +422,7 @@ register_autonomous_handlers(app)
 register_workspace_handlers(app, _run_agent)
 register_preferences_handlers(app, _run_agent)
 register_google_handlers(app)
+register_coding_handlers(app)
 
 
 
@@ -395,12 +453,35 @@ def handle_mention(event, client, say):
             result = client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_ts,
-                text="👋 Please select or create a workspace to get started.",
-                blocks=build_workspace_blocks(thread_ts),
+                text="👋 Welcome to Gemma Swarm! What would you like to do?",
+                blocks=build_graph_selector_blocks(thread_ts),
             )
             state.workspace_msg_ts = result.get("ts", "")
         except Exception as e:
-            logger.error(f"[slack] Could not post workspace buttons: {e}")
+            logger.error(f"[slack] Could not post graph selector: {e}")
+        return
+
+    # Route to coding agent if this thread is in coding mode
+    if getattr(state, "coding_mode", False):
+        if getattr(state, "coding_active", False):
+            # Already running — queue the message
+            state.pending_message = text
+            try:
+                client.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text="⏳ Coding agent is busy. Your message has been queued.",
+                )
+            except Exception:
+                pass
+            return
+        state.coding_active = True
+        state.cancel_event  = threading.Event()
+        threading.Thread(
+            target=run_coding_session_slack,
+            args=(text, thread_ts, channel, client, say,
+                  state.workspace_path, state.project_name, thread_ts),
+            daemon=True,
+        ).start()
         return
 
     _handle_message(_strip_slack_formatting(text), thread_ts, channel, client, say)
@@ -431,6 +512,28 @@ def handle_message_event(event, client, say):
     if not state.workspace_path:
         return
 
+    # Route to coding agent if this thread is in coding mode
+    if getattr(state, "coding_mode", False):
+        if getattr(state, "coding_active", False):
+            state.pending_message = _strip_slack_formatting(text)
+            try:
+                client.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text="⏳ Coding agent is busy. Your message has been queued.",
+                )
+            except Exception:
+                pass
+            return
+        state.coding_active = True
+        state.cancel_event  = threading.Event()
+        threading.Thread(
+            target=run_coding_session_slack,
+            args=(_strip_slack_formatting(text), thread_ts, channel, client, say,
+                  state.workspace_path, state.project_name, thread_ts),
+            daemon=True,
+        ).start()
+        return
+
     _handle_message(_strip_slack_formatting(text), thread_ts, channel, client, say)
 
 
@@ -445,6 +548,7 @@ def main():
     from autonomous.scheduler import start as start_autonomous_scheduler
 
     load_registry_into_threads()
+    load_coding_registry_into_threads()
     # logger.info("[slack] Thread registry loaded.")
 
     try:

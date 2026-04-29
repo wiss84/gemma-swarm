@@ -18,7 +18,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 
 from agents_utils.state import AgentState, default_state
-from agents_utils.config import LABEL
+from agents_utils.config import LABEL, LANGGRAPH_RECURSION_LIMIT
 from agents_utils.memory import get_checkpointer
 
 # Agents
@@ -44,7 +44,12 @@ from nodes.human_gate      import human_gate_node
 from nodes.output_formatter import output_formatter_node
 
 # Tools
-from tools.file_tools import set_workspace
+_workspace_path: str = ""
+
+def set_workspace(path: str):
+    global _workspace_path
+    _workspace_path = path
+    logger.info(f"[workspace] Set to: {path}")
 
 logger = logging.getLogger(__name__)
 
@@ -495,7 +500,7 @@ def ask(
 ) -> list[str] | None:
     graph            = get_graph()
     actual_thread_id = thread_id_override or thread_id
-    config           = {"configurable": {"thread_id": actual_thread_id}, "recursion_limit": 100}
+    config           = {"configurable": {"thread_id": actual_thread_id}, "recursion_limit": LANGGRAPH_RECURSION_LIMIT}
 
     if workspace_path:
         set_workspace(workspace_path)

@@ -46,6 +46,11 @@ class ThreadState:
     interrupt_message: str            = ""     # The message that triggered interrupt
     interrupt_action:  str             = ""     # "combine", "fresh", or "queue"
 
+    # Coding Agent
+    coding_mode:       bool            = False  # True when this thread is a coding session
+    coding_active:     bool            = False  # True while the coding agent is running
+    coding_status_ts:  str             = ""     # ts of the current tool-status message
+
 
 _threads: dict[str, ThreadState] = {}
 _threads_lock = threading.Lock()
@@ -120,6 +125,47 @@ def load_registry_into_threads():
                     project_name     = data.get("project_name", ""),
                     channel_id       = data.get("channel_id", ""),
                 )
+
+
+CODING_REGISTRY_FILE = PROJECT_ROOT / "coding_thread_registry.json"
+
+
+def _load_coding_registry() -> dict:
+    """Load coding thread → workspace mapping from disk."""
+    if not CODING_REGISTRY_FILE.exists():
+        return {}
+    try:
+        return json.loads(CODING_REGISTRY_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"[thread_state] Could not load coding registry: {e}")
+        return {}
+
+
+def load_coding_registry_into_threads():
+    """
+    Called once on startup.
+    Pre-populates _threads with saved coding workspace paths so existing
+    Slack threads resume without showing workspace selection again.
+    """
+    registry = _load_coding_registry()
+    if not registry:
+        return
+
+    with _threads_lock:
+        for thread_ts, data in registry.items():
+            if thread_ts not in _threads:
+                _threads[thread_ts] = ThreadState(
+                    active_thread_id = thread_ts,
+                    workspace_path   = data.get("workspace_root", ""),
+                    project_name     = data.get("project_name", ""),
+                    channel_id       = data.get("channel_id", ""),
+                    coding_mode      = True,
+                )
+            else:
+                _threads[thread_ts].workspace_path = data.get("workspace_root", "")
+                _threads[thread_ts].project_name = data.get("project_name", "")
+                _threads[thread_ts].channel_id = data.get("channel_id", "")
+                _threads[thread_ts].coding_mode = True
     # logger.info(f"[thread_state] Loaded {len(registry)} thread(s) from registry.")
 
 

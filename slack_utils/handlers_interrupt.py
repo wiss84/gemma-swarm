@@ -275,9 +275,12 @@ def register_interrupt_handlers(app, run_agent_fn):
         state.old_thread_id = old_thread_id
         state.active_channel = channel
         
-        # Cancel the old task if still running
+        # Cancel the old task if still running.
+        # Also eagerly set state.active = False so if the user sends a new message
+        # before the old thread's finally block runs, it won't be treated as another interrupt.
         if state.active:
             state.cancel_event.set()
+            state.active = False
         
         graph = get_graph()
         config = {"configurable": {"thread_id": old_thread_id}}

@@ -22,6 +22,8 @@ import logging
 from agents.base_agent import BaseAgent
 from agents_utils.state import AgentState
 from agents_utils.config import LABEL
+from agents_utils.context_tracker import snapshot_context_usage
+from agents_utils.context_ui_launcher import launch_context_ui
 from slack_utils.handlers_workspace import get_user_preferences_prompt
 
 logger = logging.getLogger(__name__)
@@ -172,10 +174,40 @@ def supervisor_agent_node(state: AgentState) -> dict:
         f"email={requires_email}, complete={task_complete}"
     )
 
+    # Build the new message list (supervisor's response appended)
+    new_messages = messages + [
+        HumanMessage(content=f"{LABEL['supervisor']}\n{response_text}")
+    ]
+
+    # ── Context usage snapshot ─────────────────────────────────────────────────
+    # Supervisor has no tools → include_tool_schemas=False
+    try:
+        session_id = state.get("slack_thread_ts", "")
+        project_name = f"assistant\\{state.get('project_name', '')}"
+        system_prompt = agent.get_system_prompt()
+
+        snapshot_context_usage(
+            session_id=session_id,
+            project_name=project_name,
+            messages=new_messages,
+            system_prompt=system_prompt,
+            model=agent.model_name,
+            include_tool_schemas=False,
+            task_complete=False,  # supervisor does not reset context; conversation persists
+            workspace_path="",  # not used by supervisor
+            agent_notes_enabled=False,  # not used when include_tool_schemas=False
+        )
+    except Exception as e:
+        logger.warning(f"[supervisor] Context snapshot failed: {e}")
+
+    # Launch UI if not already running (idempotent)
+    try:
+        launch_context_ui()
+    except Exception as e:
+        logger.warning(f"[supervisor] UI launch failed: {e}")
+
     return {
-        "messages": messages + [
-            HumanMessage(content=f"{LABEL['supervisor']}\n{response_text}")
-        ],
+        "messages": new_messages,
         "original_task":           original_task,
         "current_subtask":         new_subtask,
         "task_plan":               task_plan,

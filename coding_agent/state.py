@@ -59,6 +59,12 @@ class CodingAgentState(TypedDict):
     slack_thread_ts: str
     slack_channel:   str
 
+    # ── Model Override ──────────────────────────────────────────────────────────
+    model_override: str        # optional model name to replace the default coding_agent model
+
+    # ── Agent Notes ─────────────────────────────────────────────────────────────
+    agent_notes_enabled: bool  # whether the agent can read/write learning notes
+
 
 def default_coding_state(
     workspace_path:  str = "",
@@ -66,6 +72,8 @@ def default_coding_state(
     session_id:      str = "",
     slack_thread_ts: str = "",
     slack_channel:   str = "",
+    model_override:  str = "",
+    agent_notes_enabled: bool = True,
 ) -> CodingAgentState:
     """
     Return a fresh CodingAgentState with sensible defaults.
@@ -85,4 +93,6 @@ def default_coding_state(
         formatted_output=[],
         slack_thread_ts=slack_thread_ts,
         slack_channel=slack_channel,
+        model_override=model_override,
+        agent_notes_enabled=agent_notes_enabled,
     )

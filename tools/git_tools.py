@@ -27,10 +27,13 @@ import re
 import os
 import logging
 import subprocess
+import threading
+from queue import Queue, Empty
 from pathlib import Path
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
 from agents_utils.config import PROJECT_ROOT, HUMAN_CONFIRMATION_TIMEOUT
+from tools.coding_tools import _workspace_root
 
 logger = logging.getLogger(__name__)
 
@@ -46,26 +49,91 @@ _BRANCH_NAME_RE = re.compile(r"^(?![-./])(?!.*\.\.)(?!.*@\{)[^\x00-\x1f ~^:?*\[\
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
+def _is_within_workspace(resolved_path: Path, workspace_root: Path) -> bool:
+    """
+    Check if resolved_path is within workspace_root or its subdirectories.
+    Returns False if the path attempts to escape the workspace via .. or symlinks.
+    """
+    try:
+        resolved_path.relative_to(workspace_root)
+        return True
+    except ValueError:
+        return False
+
+
 def _resolve_path(path: str) -> Path:
+    """Resolve a path for git operations with workspace boundary validation."""
+    workspace_root = _workspace_root()
     p = Path(path)
-    return p.resolve() if p.is_absolute() else (PROJECT_ROOT / path).resolve()
+    resolved = p.resolve() if p.is_absolute() else (workspace_root / path).resolve()
+    
+    # Validate path is within workspace
+    if not _is_within_workspace(resolved, workspace_root):
+        raise ValueError(
+            f"Access denied: path is outside your workspace. "
+            f"Attempted: {resolved} | Workspace: {workspace_root}"
+        )
+    
+    return resolved
 
 
 def _run_git(args: list[str], cwd: Path, timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, str]:
     """
     Run a git command and return (returncode, stdout, stderr).
+    Safe from deadlocks — uses threaded output draining.
     Always uses list form (no shell=True) for safety.
     """
     cmd = ["git"] + args
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ},
         )
-        return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+        stdout_queue = Queue()
+        stderr_queue = Queue()
+
+        def _drain_pipe(pipe, queue):
+            for line in iter(pipe.readline, b''):
+                queue.put(line)
+            pipe.close()
+
+        threading.Thread(target=_drain_pipe, args=(proc.stdout, stdout_queue), daemon=True).start()
+        threading.Thread(target=_drain_pipe, args=(proc.stderr, stderr_queue), daemon=True).start()
+
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+        stdout_chunks = []
+        stderr_chunks = []
+
+        while True:
+            try:
+                stdout_chunks.append(stdout_queue.get_nowait())
+            except Empty:
+                break
+
+        while True:
+            try:
+                stderr_chunks.append(stderr_queue.get_nowait())
+            except Empty:
+                break
+
+        stdout_bytes = b''.join(stdout_chunks)
+        stderr_bytes = b''.join(stderr_chunks)
+
+        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+
+        return proc.returncode, stdout.strip(), stderr.strip()
+
     except subprocess.TimeoutExpired:
         return -1, "", f"git command timed out after {timeout}s"
     except FileNotFoundError:
@@ -129,7 +197,7 @@ def git_status(repo_path: str = "") -> str:
     Also shows the current branch name.
     Returns an error string starting with '[' on failure.
     """
-    resolved, err = _validate_repo(repo_path or str(PROJECT_ROOT))
+    resolved, err = _validate_repo(repo_path or str(_workspace_root()))
     if err:
         return err
 
@@ -176,7 +244,7 @@ def git_diff(repo_path: str = "", file_path: str = "") -> str:
     Use this to review changes before committing, or to pass to a review subagent.
     Returns an error string starting with '[' on failure.
     """
-    resolved, err = _validate_repo(repo_path or str(PROJECT_ROOT))
+    resolved, err = _validate_repo(repo_path or str(_workspace_root()))
     if err:
         return err
 
@@ -245,7 +313,7 @@ def git_commit(repo_path: str = "", message: str = "") -> str:
     Returns the short commit hash and summary on success.
     Returns an error string starting with '[' on failure.
     """
-    resolved, err = _validate_repo(repo_path or str(PROJECT_ROOT))
+    resolved, err = _validate_repo(repo_path or str(_workspace_root()))
     if err:
         return err
 
@@ -254,16 +322,6 @@ def git_commit(repo_path: str = "", message: str = "") -> str:
         return "[git_commit error: Commit message cannot be empty.]"
 
     branch = _current_branch(resolved)
-
-    # Warn if on a protected branch — don't block, just flag it clearly
-    branch_warning = ""
-    if branch in PROTECTED_BRANCHES:
-        branch_warning = (
-            f"\n⚠️  WARNING: You are committing directly on '{branch}'. "
-            f"The agent should have created a feature branch first via git_create_branch. "
-            f"This commit will proceed, but this is not recommended.\n"
-        )
-        logger.warning(f"[git_commit] Committing on protected branch '{branch}' in {resolved}")
 
     # Check there is actually something to commit
     rc_check, status_out, _ = _run_git(["status", "--short"], resolved)
@@ -290,13 +348,12 @@ def git_commit(repo_path: str = "", message: str = "") -> str:
             short_hash = m.group(1)
             break
 
-    result = (
+    return (
         f"git_commit: ✓ Committed on branch '{branch}'\n"
         f"Hash: {short_hash}\n"
         f"Message: {message}\n"
         f"Repo: {resolved}"
     )
-    return branch_warning + result if branch_warning else result
 
 
 # ── Tool 4: git_create_branch ─────────────────────────────────────────────────
@@ -323,7 +380,7 @@ def git_create_branch(repo_path: str = "", branch_name: str = "") -> str:
     Validates the branch name format (no spaces, no special characters).
     Returns an error string starting with '[' on failure.
     """
-    resolved, err = _validate_repo(repo_path or str(PROJECT_ROOT))
+    resolved, err = _validate_repo(repo_path or str(_workspace_root()))
     if err:
         return err
 
@@ -382,7 +439,7 @@ def git_restore_file(repo_path: str = "", file_path: str = "") -> str:
     last committed state.
     Returns an error string starting with '[' on failure.
     """
-    resolved, err = _validate_repo(repo_path or str(PROJECT_ROOT))
+    resolved, err = _validate_repo(repo_path or str(_workspace_root()))
     if err:
         return err
 
@@ -440,7 +497,7 @@ def git_restore_all(repo_path: str = "", thread_ts: str = "", channel: str = "")
     Use git_restore_file to undo a single file without requiring confirmation.
     Returns an error string starting with '[' on failure or rejection.
     """
-    resolved, err = _validate_repo(repo_path or str(PROJECT_ROOT))
+    resolved, err = _validate_repo(repo_path or str(_workspace_root()))
     if err:
         return err
 

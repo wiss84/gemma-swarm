@@ -1,0 +1,12 @@
+{
+  "name": "ts-analysis-bridge",
+  "version": "1.0.0",
+  "description": "Semantic JS/TS analysis bridge for gemma-swarm coding agent",
+  "main": "index.js",
+  "scripts": {
+    "install-check": "node -e \"require('ts-morph'); console.log('ts-morph OK');\""
+  },
+  "dependencies": {
+    "ts-morph": "^22.0.0"
+  }
+}

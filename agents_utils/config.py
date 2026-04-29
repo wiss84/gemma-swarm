@@ -11,8 +11,15 @@ load_dotenv()
 
 # ── Project Root ───────────────────────────────────────────────────────────────
 
-PROJECT_ROOT    = Path(__file__).resolve().parents[1]
-WORKSPACE_ROOT  = PROJECT_ROOT / "workspaces"
+PROJECT_ROOT             = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT           = PROJECT_ROOT / "workspaces"
+ASSISTANT_WORKSPACE_ROOT = WORKSPACE_ROOT / "assistant"
+CODING_WORKSPACE_ROOT    = WORKSPACE_ROOT / "coding"
+
+# Ensure workspace roots exist
+WORKSPACE_ROOT.mkdir(exist_ok=True)
+ASSISTANT_WORKSPACE_ROOT.mkdir(exist_ok=True)
+CODING_WORKSPACE_ROOT.mkdir(exist_ok=True)
 DB_PATH               = PROJECT_ROOT / "checkpoints.db"
 LINKEDIN_STATE_PATH   = PROJECT_ROOT / "linkedin_state.json"
 GOOGLE_STATE_PATH     = PROJECT_ROOT / "google_state.json"
@@ -37,30 +44,34 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASS")
 EMAIL_LAYOUTS_DIR = PROJECT_ROOT / "email_layouts"
 
 # ── Model Assignments ──────────────────────────────────────────────────────────
+#
+# Gemma 3 / 3n models are discontinued April 30, 2026.
+# All agents migrated to Gemma 4 family.
+#
+# Model selection rationale:
+#   gemma-4-31b-it      — best reasoning, 256k context, 15 RPM / 1500 RPD
+#                          used for orchestration and complex reasoning tasks
+#   gemma-4-26b-a4b-it  — fast MoE architecture, 256k context, same RPD bucket
+#                          used for structured/constrained tasks (JSON in/out)
 
 MODELS = {
-    "supervisor":        "gemma-4-31b-it",    # Upgraded: best reasoning for orchestration
-    "planner":           "gemma-3-27b-it",
-    "researcher":        "gemma-3-27b-it",
-    "deep_researcher":   "gemma-4-26b-a4b-it",
-    "email_composer":    "gemma-3-4b-it",
-    "linkedin_composer": "gemma-3n-e4b-it",
-    "task_classifier":   "gemma-3-27b-it",
-    "memory":            "gemma-4-31b-it",
-    "validator":         "gemma-3n-e2b-it",
-    "gmail_agent":       "gemma-3-4b-it",
-    "calendar_agent":    "gemma-3-4b-it",
-    "docs_agent":        "gemma-3-4b-it",
-    "sheets_agent":      "gemma-3-4b-it",
+    # ── Main graph agents ──────────────────────────────────────────────────────
+    "supervisor":        "gemma-4-31b-it",   # orchestration, routing decisions
+    "planner":           "gemma-4-31b-it",   # multi-step task decomposition
+    "researcher":        "gemma-4-31b-it",   # web search synthesis
+    "deep_researcher":   "gemma-4-26b-a4b-it", # URL fetch + summarise
+    "email_composer":    "gemma-4-26b-a4b-it", # structured email JSON output
+    "linkedin_composer": "gemma-4-26b-a4b-it", # structured post JSON output
+    "task_classifier":   "gemma-4-31b-it",   # simple/complex classification
+    "memory":            "gemma-4-31b-it",   # context compression
+    "validator":         "gemma-4-26b-a4b-it", # pass/fail JSON validation
+    "gmail_agent":       "gemma-4-26b-a4b-it", # structured Gmail JSON output
+    "calendar_agent":    "gemma-4-26b-a4b-it", # structured Calendar JSON output
+    "docs_agent":        "gemma-4-26b-a4b-it", # structured Docs JSON output
+    "sheets_agent":      "gemma-4-26b-a4b-it", # structured Sheets JSON output
     # ── Coding Agent ──────────────────────────────────────────────────────────
-    # All roles use gemma-4-31b-it: best reasoning + current training cutoff.
-    # gemma-3-27b-it is intentionally excluded — its early-2024 cutoff means
-    # it will confidently generate stale API calls for packages like LangChain.
     "coding_agent":      "gemma-4-31b-it",
-    "coding_research":   "gemma-4-31b-it",
-    "coding_refactor":   "gemma-4-26b-a4b-it",
-    "coding_test":       "gemma-4-26b-a4b-it",
-    "coding_review":     "gemma-4-26b-a4b-it",
+    "coding_subagent":   "gemma-4-26b-a4b-it",
 }
 
 # ── Model Context Windows ──────────────────────────────────────────────────────
@@ -68,12 +79,6 @@ MODELS = {
 MODEL_CONTEXT_WINDOWS = {
     "gemma-4-31b-it":       256000,
     "gemma-4-26b-a4b-it":   256000,
-    "gemma-3-27b-it":       128000,
-    "gemma-3-12b-it":       128000,
-    "gemma-3-4b-it":        128000,
-    "gemma-3n-e2b-it":       32000,
-    "gemma-3-1b-it":         32000,
-    "gemma-3n-e4b-it":      128000,
 }
 
 # ── Retry Limits Per Agent ─────────────────────────────────────────────────────
@@ -93,10 +98,7 @@ MAX_RETRIES = {
     "sheets_agent":      3,
     # ── Coding Agent ──────────────────────────────────────────────────────────
     "coding_agent":      5,
-    "coding_research":   3,
-    "coding_refactor":   3,
-    "coding_test":       3,
-    "coding_review":     3,
+    "coding_subagent":   3,
 }
 
 MAX_RETRIES_SERVICE_UNAVAILABLE = {
@@ -113,18 +115,15 @@ MAX_TOOL_ITERATIONS = 15
 
 # Per-agent overrides for coding agent roles.
 # The main coding agent needs more steps for complex tasks (research → write → validate → fix).
-# Subagents are scoped so they stay lower.
+# The subagent gets a generous limit since it handles any task type.
 CODING_MAX_TOOL_ITERATIONS = {
-    "coding_agent":    30,
-    "coding_research": 10,
-    "coding_refactor": 15,
-    "coding_test":     15,
-    "coding_review":   10,
+    "coding_agent":    100,
+    "coding_subagent": 100,
 }
 
 # ── Context Window Thresholds ──────────────────────────────────────────────────
 
-CONTEXT_SUMMARIZE_THRESHOLD = 0.10
+CONTEXT_SUMMARIZE_THRESHOLD = 0.70
 
 # ── File Processing Limits ─────────────────────────────────────────────────────
 
@@ -132,7 +131,7 @@ MAX_CONTEXT_CHARS = 40000
 
 # ── LangGraph Settings ─────────────────────────────────────────────────────────
 
-LANGGRAPH_RECURSION_LIMIT = 100
+LANGGRAPH_RECURSION_LIMIT = 1000
 
 # ── Timeouts ──────────────────────────────────────────────────────────────────
 
@@ -160,10 +159,7 @@ LABEL = {
     "tool_result":           "[TOOL RESULT]",
     # ── Coding Agent ──────────────────────────────────────────────────────────
     "coding_agent":          "[CODING AGENT]",
-    "coding_research":       "[RESEARCH SUBAGENT]",
-    "coding_refactor":       "[REFACTOR SUBAGENT]",
-    "coding_test":           "[TEST SUBAGENT]",
-    "coding_review":         "[REVIEW SUBAGENT]",
+    "coding_subagent":       "[CODING SUBAGENT]",
 }
 
 # ── Guard Rails — Blocked Patterns ────────────────────────────────────────────

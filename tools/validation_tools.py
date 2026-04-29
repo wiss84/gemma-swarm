@@ -1,39 +1,29 @@
 """
-Gemma Swarm — Coding Agent: Layer 4 Validation Tools
-======================================================
-Tools the coding agent uses to verify its own work after writing code.
-The agent should ALWAYS run these after writing or editing any file.
-Never trust unvalidated output — if these tools report errors, fix them.
+Gemma Swarm — Coding Agent: Layer 4 Validation Tools (Python)
+==============================================================
+Python-specific validation tools used internally by validate_files_universal.
+Not registered as agent tools directly — the agent uses validate_files (below)
+which routes to the correct language validator via Magika detection.
 
-Tools:
-    run_tests(test_path, working_dir)         — pytest / unittest runner
-    run_linter(file_path, working_dir)        — ruff (primary) / flake8 (fallback)
-    check_imports(file_path, working_dir)     — verify all imports resolve
-    run_type_checker(file_path, working_dir)  — mypy (skips gracefully if not installed)
+For JS/TS and other language validation, see: validation_tools_universal.py
 
 Environment safety:
-    All commands are run via subprocess with the conda env redirection logic
-    from coding_tools.py — if CONDA_DEFAULT_ENV == gemma_swarm, python/pytest
-    commands are prefixed with `conda run -n gemma_test`.
-
-Workflow the agent must follow:
-    1. Write the file
-    2. check_imports(file)       → verify imports work before anything else
-    3. run_linter(file)          → catch style/syntax issues
-    4. run_tests(test_file)      → confirm behaviour is correct
-    5. run_type_checker(file)    → optional but useful for large modules
-    If any step fails → fix the issue → repeat from that step
+    All commands are run via subprocess with absolute Python exe redirection.
+    If CONDA_DEFAULT_ENV == gemma_swarm, python/pytest/pip commands are
+    substituted with the absolute path to the gemma_test Python executable.
 """
 
 import re
-import os
 import logging
-import platform
+import os
 import subprocess
+import threading
+from queue import Queue, Empty
 from pathlib import Path
 from pydantic import BaseModel, Field
-from langchain_core.tools import tool
-from agents_utils.config import PROJECT_ROOT, BLOCKED_PATTERNS
+from langchain_core.tools import tool  # kept: validate_files is still a @tool
+from agents_utils.get_test_env import get_gemma_test_python_exe
+from tools.coding_tools import _workspace_root
 
 logger = logging.getLogger(__name__)
 
@@ -48,35 +38,90 @@ TEST_ENV_NAME     = "gemma_test"
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
-def _active_conda_env() -> str:
-    return os.environ.get("CONDA_DEFAULT_ENV", "")
-
-
 def _resolve_path(path: str) -> Path:
     p = Path(path)
-    return p.resolve() if p.is_absolute() else (PROJECT_ROOT / path).resolve()
+    return p.resolve() if p.is_absolute() else (_workspace_root() / path).resolve()
 
 
 def _run_command(cmd: list[str], cwd: Path, timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, str]:
     """
     Run a command as a list (never shell=True) and return (returncode, stdout, stderr).
-    Automatically redirects python/pytest commands to gemma_test if in gemma_swarm env.
+    ALWAYS redirects python/pytest/pip/ruff/mypy commands to the gemma_test environment
+    by substituting the absolute Python executable path.
+    Does NOT rely on CONDA_DEFAULT_ENV — that variable is unreliable at tool runtime.
+    Safe from deadlocks — uses threaded output draining.
     """
-    # Redirect to test env if in production
-    if _active_conda_env() == PROD_ENV_NAME:
-        if cmd[0] in ("python", "python3", "pytest"):
-            cmd = ["conda", "run", "-n", TEST_ENV_NAME] + cmd
-            logger.info(f"[validation] Redirecting to {TEST_ENV_NAME}: {cmd[:6]}")
+    py_exe = get_gemma_test_python_exe()
+    if cmd[0] in ("python", "python3"):
+        cmd = [py_exe] + cmd[1:]
+        logger.info(f"[validation] Using {TEST_ENV_NAME} python: {py_exe}")
+    elif cmd[0] == "pytest":
+        cmd = [py_exe, "-m", "pytest"] + cmd[1:]
+        logger.info(f"[validation] Using {TEST_ENV_NAME} pytest via: {py_exe} -m pytest")
+    elif cmd[0] in ("pip", "pip3"):
+        cmd = [py_exe, "-m", "pip"] + cmd[1:]
+        logger.info(f"[validation] Using {TEST_ENV_NAME} pip via: {py_exe} -m pip")
+    elif cmd[0] == "ruff":
+        cmd = [py_exe, "-m", "ruff"] + cmd[1:]
+        logger.info(f"[validation] Using {TEST_ENV_NAME} ruff via: {py_exe} -m ruff")
+    elif cmd[0] == "mypy":
+        cmd = [py_exe, "-m", "mypy"] + cmd[1:]
+        logger.info(f"[validation] Using {TEST_ENV_NAME} mypy via: {py_exe} -m mypy")
+    elif cmd[0] == "flake8":
+        cmd = [py_exe, "-m", "flake8"] + cmd[1:]
+        logger.info(f"[validation] Using {TEST_ENV_NAME} flake8 via: {py_exe} -m flake8")
 
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ},
         )
-        return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+        stdout_queue = Queue()
+        stderr_queue = Queue()
+
+        def _drain_pipe(pipe, queue):
+            for line in iter(pipe.readline, b''):
+                queue.put(line)
+            pipe.close()
+
+        threading.Thread(target=_drain_pipe, args=(proc.stdout, stdout_queue), daemon=True).start()
+        threading.Thread(target=_drain_pipe, args=(proc.stderr, stderr_queue), daemon=True).start()
+
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return -1, "", f"Command timed out after {timeout}s"
+
+        stdout_chunks = []
+        stderr_chunks = []
+
+        while True:
+            try:
+                stdout_chunks.append(stdout_queue.get_nowait())
+            except Empty:
+                break
+
+        while True:
+            try:
+                stderr_chunks.append(stderr_queue.get_nowait())
+            except Empty:
+                break
+
+        stdout_bytes = b''.join(stdout_chunks)
+        stderr_bytes = b''.join(stderr_chunks)
+
+        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+
+        return proc.returncode, stdout.strip(), stderr.strip()
+
     except subprocess.TimeoutExpired:
         return -1, "", f"Command timed out after {timeout}s"
     except FileNotFoundError as e:
@@ -97,15 +142,51 @@ def _truncate(text: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
 
 
 def _tool_available(tool_name: str) -> bool:
-    """Check if a CLI tool is available in PATH."""
+    """Check if a CLI tool is available in PATH. Safe from deadlocks."""
     try:
-        subprocess.run(
+        proc = subprocess.Popen(
             [tool_name, "--version"],
-            capture_output=True,
-            timeout=5,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ},
         )
-        return True
+
+        # For a tiny output like --version, we can just wait and drain after
+        # Using same pattern ensures no deadlock even if tool misbehaves
+        stdout_queue = Queue()
+        stderr_queue = Queue()
+
+        def _drain_pipe(pipe, queue):
+            for line in iter(pipe.readline, b''):
+                queue.put(line)
+            pipe.close()
+
+        threading.Thread(target=_drain_pipe, args=(proc.stdout, stdout_queue), daemon=True).start()
+        threading.Thread(target=_drain_pipe, args=(proc.stderr, stderr_queue), daemon=True).start()
+
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return False
+
+        # Drain any output (not needed for boolean check, but prevents resource leaks)
+        while True:
+            try:
+                stdout_queue.get_nowait()
+            except Empty:
+                break
+        while True:
+            try:
+                stderr_queue.get_nowait()
+            except Empty:
+                break
+
+        return proc.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    except Exception:
         return False
 
 
@@ -134,235 +215,202 @@ def _extract_imports(file_path: Path) -> list[str]:
     return list(dict.fromkeys(modules))  # deduplicate while preserving order
 
 
-# ── Tool 1: run_tests ─────────────────────────────────────────────────────────
+# ── validate_files (Python) ──────────────────────────────────────────────────
 
-class RunTestsInput(BaseModel):
-    test_path:   str = Field(description="Path to a test file or directory to run. Absolute or project-relative.")
-    working_dir: str = Field(default="", description="Working directory for the test run. Defaults to project root.")
-    timeout:     int = Field(default=DEFAULT_TIMEOUT, description=f"Timeout in seconds. Max {MAX_TIMEOUT}.")
-
-
-@tool(args_schema=RunTestsInput)
-def run_tests(test_path: str, working_dir: str = "", timeout: int = DEFAULT_TIMEOUT) -> str:
-    """
-    Run a test file or directory using pytest (preferred) or unittest (fallback).
-    Returns the full output including pass/fail counts and any error tracebacks.
-    Always run this after writing or modifying code to confirm it works.
-    Returns an error string starting with '[' on failure to even launch.
-    """
-    timeout = min(max(5, timeout), MAX_TIMEOUT)
-
-    try:
-        resolved = _resolve_path(test_path)
-        if not resolved.exists():
-            return f"[run_tests error: Test path not found: {resolved}]"
-
-        cwd = _resolve_path(working_dir) if working_dir else PROJECT_ROOT
-        if not cwd.exists():
-            return f"[run_tests error: Working directory not found: {cwd}]"
-
-        # Prefer pytest; fall back to unittest
-        if _tool_available("pytest"):
-            cmd = ["pytest", str(resolved), "-v", "--tb=short", "--no-header"]
-            runner = "pytest"
-        else:
-            cmd = ["python", "-m", "unittest", str(resolved), "-v"]
-            runner = "unittest"
-
-        logger.info(f"[validation] Running {runner}: {resolved}")
-        rc, stdout, stderr = _run_command(cmd, cwd, timeout)
-
-        output = ""
-        if stdout:
-            output += stdout
-        if stderr:
-            output += ("\n\n" if output else "") + stderr
-
-        output = _truncate(output)
-
-        # Build a clean summary header
-        status = "PASSED" if rc == 0 else "FAILED"
-        header = f"Test run ({runner}): {status}\nPath: {resolved}\nExit code: {rc}\n" + "─" * 60 + "\n\n"
-
-        return header + (output if output else "(no output)")
-
-    except Exception as e:
-        return f"[run_tests error: {e}]"
-
-
-# ── Tool 2: run_linter ────────────────────────────────────────────────────────
-
-class RunLinterInput(BaseModel):
-    file_path:   str = Field(description="Path to the Python file to lint. Absolute or project-relative.")
+class ValidateFilesInput(BaseModel):
+    file_paths:  list[str] = Field(
+        description=(
+            "List of Python file paths to check_imports + run_linter on (absolute or project-relative). "
+            "Up to 10 files. Pass all files you just wrote or edited in one call."
+        )
+    )
+    test_path:   str = Field(
+        default="",
+        description=(
+            "Optional: path to a test file or directory to run after linting. "
+            "If provided, run_tests is called once all files pass linting. "
+            "Leave empty to skip test execution."
+        )
+    )
     working_dir: str = Field(default="", description="Working directory. Defaults to project root.")
 
 
-@tool(args_schema=RunLinterInput)
-def run_linter(file_path: str, working_dir: str = "") -> str:
+@tool(args_schema=ValidateFilesInput)
+def validate_files(file_paths: list[str], test_path: str = "", working_dir: str = "") -> str:
     """
-    Run ruff (primary linter) or flake8 (fallback) on a Python file.
-    Auto-detects which linter is available — prefers ruff since it's faster.
-    Returns issues with file:line:col:code:message format, or a clean bill
-    of health if no issues are found.
-    Always lint after writing code before running tests — catch style/syntax
-    issues first since they will cause tests to fail anyway.
-    Returns an error string starting with '[' on failure to launch.
+    Run check_imports + run_linter on multiple files in one call, then optionally
+    run tests and type check, all in a single tool invocation.
+    Use this after write_files or edit_files to validate everything at once 
+    Workflow: check_imports on each file → run_linter on each file → run_tests (if test_path given) → run type check on each file.
+    Stops at the first import failure so you can fix it before linting.
+    Returns a structured report with per-file results and an overall pass/fail.
+    Up to 10 file_paths per call.
     """
-    try:
-        resolved = _resolve_path(file_path)
-        if not resolved.exists():
-            return f"[run_linter error: File not found: {resolved}]"
-        if not resolved.suffix == ".py":
-            return f"[run_linter error: Not a Python file: {resolved}]"
+    if not file_paths:
+        return "[validate_files error: file_paths list is empty]"
+    if len(file_paths) > 10:
+        return "[validate_files error: too many files — max 10 per call]"
 
-        cwd = _resolve_path(working_dir) if working_dir else PROJECT_ROOT
+    cwd = _resolve_path(working_dir) if working_dir else _workspace_root()
+    import_failures  = []
+    lint_failures    = []
+    report_lines     = []
+    all_imports_ok   = True
 
-        # Try ruff first, fall back to flake8
-        if _tool_available("ruff"):
-            cmd    = ["ruff", "check", str(resolved), "--output-format=concise"]
-            linter = "ruff"
-        elif _tool_available("flake8"):
-            cmd    = ["flake8", str(resolved), "--max-line-length=120"]
-            linter = "flake8"
-        else:
-            return (
-                "[run_linter: Neither ruff nor flake8 is installed. "
-                "Install with: pip install ruff  OR  pip install flake8]"
-            )
+    # ── Phase 1: check_imports on all files ────────────────────────────────
+    report_lines.append("=== Phase 1: Import Check ===")
+    for file_path in file_paths:
+        try:
+            resolved = _resolve_path(file_path)
+            if not resolved.exists():
+                report_lines.append(f"  ✗ {file_path}: file not found")
+                import_failures.append(file_path)
+                all_imports_ok = False
+                continue
 
-        logger.info(f"[validation] Running {linter}: {resolved}")
-        rc, stdout, stderr = _run_command(cmd, cwd)
+            modules = _extract_imports(resolved)
+            if not modules:
+                report_lines.append(f"  ✓ {file_path}: no imports")
+                continue
 
-        # ruff/flake8: exit 0 = no issues, exit 1 = issues found
-        if rc == 0:
-            return f"Linter ({linter}): ✓ No issues found in {resolved.name}"
-
-        output = stdout or stderr
-        output = _truncate(output)
-
-        # Count issues for the summary
-        issue_count = len([l for l in output.splitlines() if l.strip() and not l.startswith("Found")])
-        header = f"Linter ({linter}): {issue_count} issue(s) found in {resolved.name}\n" + "─" * 60 + "\n\n"
-        return header + output
-
-    except Exception as e:
-        return f"[run_linter error: {e}]"
-
-
-# ── Tool 3: check_imports ─────────────────────────────────────────────────────
-
-class CheckImportsInput(BaseModel):
-    file_path:   str = Field(description="Path to the Python file to check imports for. Absolute or project-relative.")
-    working_dir: str = Field(default="", description="Working directory. Defaults to project root.")
-
-
-@tool(args_schema=CheckImportsInput)
-def check_imports(file_path: str, working_dir: str = "") -> str:
-    """
-    Verify that all import statements in a Python file resolve correctly.
-    Parses the file to extract all imports, then tries importing each one.
-    This catches missing packages and typos in import paths before running tests.
-    Call this immediately after writing a new file, before linting or testing.
-    Returns a per-import pass/fail report.
-    Returns an error string starting with '[' if the file cannot be read.
-    """
-    try:
-        resolved = _resolve_path(file_path)
-        if not resolved.exists():
-            return f"[check_imports error: File not found: {resolved}]"
-        if resolved.suffix != ".py":
-            return f"[check_imports error: Not a Python file: {resolved}]"
-
-        cwd = _resolve_path(working_dir) if working_dir else PROJECT_ROOT
-
-        modules = _extract_imports(resolved)
-        if not modules:
-            return f"check_imports: No import statements found in {resolved.name}"
-
-        results  = []
-        failures = []
-
-        for module in modules:
-            rc, stdout, stderr = _run_command(
-                ["python", "-c", f"import {module}"],
-                cwd,
-                timeout=10,
-            )
-            if rc == 0:
-                results.append(f"  ✓ import {module}")
-            else:
-                # Extract the most relevant error line
-                err_lines = (stderr or stdout).splitlines()
-                err_msg   = next(
-                    (l for l in reversed(err_lines) if l.strip()),
-                    "unknown error"
+            file_ok = True
+            for module in modules:
+                # Use forward slashes to avoid Windows backslash unicode-escape errors.
+                safe_cwd = str(cwd).replace("\\", "/")
+                inject = f"import sys; sys.path.insert(0, r'{safe_cwd}'); "
+                rc, _, stderr = _run_command(
+                    ["python", "-c", inject + f"import {module}"],
+                    cwd,
+                    timeout=10,
                 )
-                results.append(f"  ✗ import {module}  →  {err_msg}")
-                failures.append(module)
+                if rc != 0:
+                    err_lines = stderr.splitlines()
+                    err_msg = next((l for l in reversed(err_lines) if l.strip()), "unknown error")
+                    report_lines.append(f"  ✗ {file_path}: import {module}  →  {err_msg}")
+                    import_failures.append(file_path)
+                    file_ok = False
+                    all_imports_ok = False
+                    break  # one failure per file is enough signal
 
-        passed = len(modules) - len(failures)
-        status = "✓ All imports OK" if not failures else f"✗ {len(failures)} import(s) failed"
-        header = (
-            f"check_imports: {status}\n"
-            f"File: {resolved.name}  ({passed}/{len(modules)} imports OK)\n"
-            + "─" * 60 + "\n\n"
-        )
-        return header + "\n".join(results)
+            if file_ok:
+                report_lines.append(f"  ✓ {file_path}: all {len(modules)} import(s) OK")
 
-    except Exception as e:
-        return f"[check_imports error: {e}]"
+        except Exception as e:
+            report_lines.append(f"  ✗ {file_path}: error — {e}")
+            import_failures.append(file_path)
+            all_imports_ok = False
 
+    # ── Phase 2: run_linter on all files (even if some imports failed — linter is safe) ─
+    report_lines.append("\n=== Phase 2: Linter ===")
+    for file_path in file_paths:
+        try:
+            resolved = _resolve_path(file_path)
+            if not resolved.exists():
+                report_lines.append(f"  ✗ {file_path}: file not found")
+                lint_failures.append(file_path)
+                continue
+            if resolved.suffix != ".py":
+                report_lines.append(f"  — {file_path}: skipped (not a .py file)")
+                continue
 
-# ── Tool 4: run_type_checker ──────────────────────────────────────────────────
+            if _tool_available("ruff"):
+                cmd    = ["ruff", "check", str(resolved), "--output-format=concise"]
+                linter = "ruff"
+            elif _tool_available("flake8"):
+                cmd    = ["flake8", str(resolved), "--max-line-length=120"]
+                linter = "flake8"
+            else:
+                report_lines.append(f"  — {file_path}: no linter installed (ruff/flake8)")
+                continue
 
-class RunTypeCheckerInput(BaseModel):
-    file_path:   str = Field(description="Path to the Python file to type-check. Absolute or project-relative.")
-    working_dir: str = Field(default="", description="Working directory. Defaults to project root.")
+            rc, stdout, stderr = _run_command(cmd, cwd)
+            if rc == 0:
+                report_lines.append(f"  ✓ {file_path}: no lint issues ({linter})")
+            else:
+                output = _truncate(stdout or stderr, 2000)
+                report_lines.append(f"  ✗ {file_path}: lint issues ({linter})\n{output}")
+                lint_failures.append(file_path)
 
+        except Exception as e:
+            report_lines.append(f"  ✗ {file_path}: lint error — {e}")
+            lint_failures.append(file_path)
 
-@tool(args_schema=RunTypeCheckerInput)
-def run_type_checker(file_path: str, working_dir: str = "") -> str:
-    """
-    Run mypy on a Python file to check for type errors.
-    Uses --ignore-missing-imports so it doesn't fail on untyped third-party packages.
-    If mypy is not installed, returns a graceful skip message rather than an error.
-    Type checking is optional but recommended for new modules — run it last after
-    check_imports, run_linter, and run_tests all pass.
-    Returns an error string starting with '[' on failure to launch.
-    """
-    try:
-        resolved = _resolve_path(file_path)
-        if not resolved.exists():
-            return f"[run_type_checker error: File not found: {resolved}]"
-        if resolved.suffix != ".py":
-            return f"[run_type_checker error: Not a Python file: {resolved}]"
-
-        if not _tool_available("mypy"):
-            return (
-                f"[run_type_checker: mypy is not installed — skipping type check for {resolved.name}. "
-                f"Install with: pip install mypy]"
+    # ── Phase 3: run_tests (optional, only if all imports and lint passed) ───────
+    test_output = ""
+    if test_path:
+        report_lines.append("\n=== Phase 3: Tests ===")
+        if import_failures or lint_failures:
+            skipped_reason = ", ".join(
+                ([f"{len(import_failures)} import failure(s)"] if import_failures else []) +
+                ([f"{len(lint_failures)} lint failure(s)"] if lint_failures else [])
             )
+            report_lines.append(f"  ⏭ Skipped: fix {skipped_reason} first")
+        else:
+            try:
+                resolved_test = _resolve_path(test_path)
+                if not resolved_test.exists():
+                    report_lines.append(f"  ✗ test path not found: {resolved_test}")
+                else:
+                    py_exe = get_gemma_test_python_exe()
+                    rc_check, _, _ = _run_command([py_exe, "-m", "pytest", "--version"], _workspace_root(), timeout=5)
+                    if rc_check == 0:
+                        test_cmd = ["pytest", str(resolved_test), "-v", "--tb=short", "--no-header"]
+                        runner   = "pytest"
+                    else:
+                        test_cmd = ["python", "-m", "unittest", str(resolved_test), "-v"]
+                        runner   = "unittest"
 
-        cwd = _resolve_path(working_dir) if working_dir else PROJECT_ROOT
+                    rc_test, stdout_t, stderr_t = _run_command(test_cmd, cwd, timeout=DEFAULT_TIMEOUT)
+                    raw = _truncate((stdout_t + "\n\n" + stderr_t).strip())
+                    status = "PASSED" if rc_test == 0 else "FAILED"
+                    report_lines.append(f"  {status} ({runner}, exit {rc_test})\n{raw}")
+            except Exception as e:
+                report_lines.append(f"  ✗ test run error: {e}")
 
-        cmd = ["mypy", str(resolved), "--ignore-missing-imports", "--no-error-summary"]
-        logger.info(f"[validation] Running mypy: {resolved}")
-        rc, stdout, stderr = _run_command(cmd, cwd)
+    # ── Phase 4: run_type_checker on all files ───────────────────────────────────────
+    type_errors = []
+    if not import_failures and not lint_failures:
+        report_lines.append("\n=== Phase 4: Type Check ===")
+        for file_path in file_paths:
+            try:
+                resolved = _resolve_path(file_path)
+                if not resolved.exists():
+                    report_lines.append(f"  ✗ {file_path}: file not found")
+                    type_errors.append(file_path)
+                    continue
+                if resolved.suffix != ".py":
+                    report_lines.append(f"  — {file_path}: skipped (not a .py file)")
+                    continue
 
-        output = stdout or stderr
-        output = _truncate(output)
+                if not _tool_available("mypy"):
+                    report_lines.append(f"  — {file_path}: mypy not installed")
+                    continue
 
-        if rc == 0:
-            return f"Type checker (mypy): ✓ No type errors found in {resolved.name}"
+                cmd = ["mypy", str(resolved), "--ignore-missing-imports", "--no-error-summary"]
+                rc, stdout, stderr = _run_command(cmd, cwd)
 
-        # Count error lines
-        error_lines = [l for l in output.splitlines() if ": error:" in l]
-        note_lines  = [l for l in output.splitlines() if ": note:" in l]
-        header = (
-            f"Type checker (mypy): {len(error_lines)} error(s), {len(note_lines)} note(s) in {resolved.name}\n"
-            + "─" * 60 + "\n\n"
-        )
-        return header + output
+                output = stdout or stderr
+                if rc == 0:
+                    report_lines.append(f"  ✓ {file_path}: no type errors (mypy)")
+                else:
+                    output_trunc = _truncate(output, 2000)
+                    error_count = len([l for l in output.splitlines() if ": error:" in l])
+                    report_lines.append(f"  ✗ {file_path}: {error_count} type error(s)\n{output_trunc}")
+                    type_errors.append(file_path)
 
-    except Exception as e:
-        return f"[run_type_checker error: {e}]"
+            except Exception as e:
+                report_lines.append(f"  ✗ {file_path}: type check error — {e}")
+                type_errors.append(file_path)
+
+    # ── Overall summary ───────────────────────────────────────────────────────────
+    total_issues = len(import_failures) + len(lint_failures) + len(type_errors)
+    overall = "✓ All checks passed" if total_issues == 0 else f"✗ {total_issues} issue(s) found"
+    header = (
+        f"validate_files: {overall}\n"
+        f"Files checked: {len(file_paths)}  |  "
+        f"Import failures: {len(import_failures)}  |  "
+        f"Lint failures: {len(lint_failures)}  |  "
+        f"Type errors: {len(type_errors)}\n"
+        + "─" * 60 + "\n\n"
+    )
+    return header + "\n".join(report_lines)

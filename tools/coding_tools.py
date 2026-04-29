@@ -4,10 +4,9 @@ Gemma Swarm — Coding Agent: Layer 1 Workspace Tools
 All tools the coding agent uses to read, write, and execute files.
 
 Tools:
-    read_file(path)                                    — Read a file's content
-    write_file(path, content)                          — Write (or overwrite) a file
-    edit_file(path, old_text, new_text)                — Replace a unique string in a file
-    list_dir(path)                                     — List directory contents as a tree
+    read_files(paths)                                  — Read multiple files at once (up to 10)
+    write_files(files)                                 — Write multiple files at once (up to 10)
+    edit_files(edits)                                  — Apply multiple edits across files (up to 20)
     glob_search(pattern, base_path)                    — Find files matching a glob pattern
     grep_search(pattern, path, file_pattern)           — Search file(s) for a regex pattern
     execute_shell(command, working_dir, timeout)       — Run a shell command safely
@@ -22,14 +21,84 @@ import os
 import re
 import subprocess
 import difflib
-import platform
 import logging
+import threading
+from queue import Queue, Empty
 from pathlib import Path
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
 from agents_utils.config import BLOCKED_PATTERNS, PROJECT_ROOT
+from agents_utils.get_test_env import get_gemma_test_python_exe
 
 logger = logging.getLogger(__name__)
+
+# ── Active cancel event (set per coding session) ──────────────────────────────
+# Set by the coding agent before each tool loop so execute_shell can kill the
+# subprocess immediately when the Stop button is clicked, rather than waiting
+# for the full timeout.
+_active_cancel_event: threading.Event | None = None
+
+
+def set_shell_cancel_event(event: threading.Event | None):
+    """Register the active session's cancel event so execute_shell can abort early."""
+    global _active_cancel_event
+    _active_cancel_event = event
+
+
+# ── Workspace root (overridden per coding session) ─────────────────────────────
+# Set by the coding agent at session start via set_coding_workspace_root().
+# All tools use this as their default path instead of PROJECT_ROOT,
+# so the agent can only access files within its assigned workspace.
+
+_CODING_WORKSPACE_ROOT: Path | None = None
+
+
+def set_coding_workspace_root(path: str):
+    """Called once per coding session. All tool path defaults point here."""
+    global _CODING_WORKSPACE_ROOT
+    _CODING_WORKSPACE_ROOT = Path(path).resolve() if path else None
+
+
+def _workspace_root() -> Path:
+    """Return the active workspace root, falling back to PROJECT_ROOT."""
+    return _CODING_WORKSPACE_ROOT if _CODING_WORKSPACE_ROOT else PROJECT_ROOT
+
+
+def _is_within_workspace(resolved_path: Path, workspace_root: Path) -> bool:
+    """
+    Check if resolved_path is within workspace_root or its subdirectories.
+    Returns False if the path attempts to escape the workspace via .. or symlinks.
+    """
+    try:
+        resolved_path.relative_to(workspace_root)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_tool_path(path: str) -> Path:
+    """
+    Resolve a path for tool use:
+    - Absolute paths are validated to be within the workspace.
+    - Relative paths are resolved against the active workspace root.
+    Raises ValueError if the resolved path escapes the workspace boundary.
+    """
+    workspace_root = _workspace_root()
+    p = Path(path)
+    
+    if p.is_absolute():
+        resolved = p.resolve()
+    else:
+        resolved = (workspace_root / path).resolve()
+    
+    # Validate path is within workspace
+    if not _is_within_workspace(resolved, workspace_root):
+        raise ValueError(
+            f"Access denied: path is outside your workspace. "
+            f"Attempted: {resolved} | Workspace: {workspace_root}"
+        )
+    
+    return resolved
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -47,26 +116,52 @@ def _active_conda_env() -> str:
     """Return the name of the active conda environment, or '' if not in one."""
     return os.environ.get("CONDA_DEFAULT_ENV", "")
 
-
 def _prefix_for_test_env(command: str) -> str:
     """
     If we are running inside the production environment (gemma_swarm),
-    prefix Python / pytest / pip commands so they run inside gemma_test instead.
-    This keeps production dependencies safe.
+    redirect Python / pytest / pip commands to use the absolute path to
+    the gemma_test Python interpreter instead of relying on conda activation.
+    This keeps production dependencies safe and works reliably on Windows.
+
+    Mapping:
+        python <args>   →  <py_exe> <args>          (direct replacement)
+        python3 <args>  →  <py_exe> <args>
+        pytest <args>   →  <py_exe> -m pytest <args>
+        pip <args>      →  <py_exe> -m pip <args>
+        pip3 <args>     →  <py_exe> -m pip <args>
     """
     active_env = _active_conda_env()
     if active_env != PROD_ENV_NAME:
         return command  # already in test env or outside conda — run directly
 
-    # Commands that should be redirected to the test environment
-    test_prefixed_commands = (
-        "python ", "python3 ", "pytest ", "pip ", "pip3 ",
-        "python\n", "pytest\n",  # edge cases with no args
-    )
-    for prefix in test_prefixed_commands:
-        if command.strip().startswith(prefix.strip()):
-            logger.info(f"[execute_shell] Redirecting command to {TEST_ENV_NAME} env")
-            return f"conda run -n {TEST_ENV_NAME} {command}"
+    py_exe = get_gemma_test_python_exe()
+    # Do NOT quote py_exe here. execute_shell runs with shell=True on all platforms,
+    # so the shell handles any spaces in the path. Embedding manual quotes breaks
+    # paths on Mac/Linux where the shell doesn't strip them.
+    stripped = command.strip()
+
+    redirects = [
+        ("python3 ", lambda rest: f"{py_exe} {rest}"),
+        ("python3",  lambda rest: f"{py_exe}{rest}"),
+        ("python ",  lambda rest: f"{py_exe} {rest}"),
+        ("python",   lambda rest: f"{py_exe}{rest}"),
+        ("pytest ",  lambda rest: f"{py_exe} -m pytest {rest}"),
+        ("pytest",   lambda rest: f"{py_exe} -m pytest{rest}"),
+        ("pip3 ",    lambda rest: f"{py_exe} -m pip {rest}"),
+        ("pip3",     lambda rest: f"{py_exe} -m pip{rest}"),
+        ("pip ",     lambda rest: f"{py_exe} -m pip {rest}"),
+        ("pip",      lambda rest: f"{py_exe} -m pip{rest}"),
+    ]
+
+    for prefix, build in redirects:
+        if stripped.startswith(prefix):
+            rest = stripped[len(prefix):]
+            redirected = build(rest)
+            logger.info(
+                f"[execute_shell] Redirecting to {TEST_ENV_NAME}: "
+                f"{prefix.strip()!r} → {redirected[:80]}"
+            )
+            return redirected
 
     return command
 
@@ -78,186 +173,6 @@ def _is_blocked(command: str) -> bool:
         if pattern.lower() in lower:
             return True
     return False
-
-
-# ── Tool 1: read_file ──────────────────────────────────────────────────────────
-
-class ReadFileInput(BaseModel):
-    path: str = Field(description="Absolute or project-relative path to the file to read.")
-
-
-@tool(args_schema=ReadFileInput)
-def read_file(path: str) -> str:
-    """
-    Read a file and return its contents as a string.
-    Paths can be absolute or relative to the project root.
-    Large files are capped at 80,000 characters to protect context window.
-    Returns an error string starting with '[' on failure.
-    """
-    try:
-        resolved = Path(path) if Path(path).is_absolute() else PROJECT_ROOT / path
-        resolved = resolved.resolve()
-
-        if not resolved.exists():
-            return f"[read_file error: File not found: {resolved}]"
-        if not resolved.is_file():
-            return f"[read_file error: Path is not a file: {resolved}]"
-
-        content = resolved.read_text(encoding="utf-8", errors="replace")
-
-        if len(content) > MAX_READ_CHARS:
-            content = content[:MAX_READ_CHARS]
-            content += f"\n\n[File truncated at {MAX_READ_CHARS} chars. Use grep_search to find specific sections.]"
-
-        return content
-
-    except Exception as e:
-        return f"[read_file error: {e}]"
-
-
-# ── Tool 2: write_file ─────────────────────────────────────────────────────────
-
-class WriteFileInput(BaseModel):
-    path:    str = Field(description="Absolute or project-relative path to write.")
-    content: str = Field(description="Full content to write. Overwrites existing file.")
-
-
-@tool(args_schema=WriteFileInput)
-def write_file(path: str, content: str) -> str:
-    """
-    Write content to a file, creating it and any parent directories if needed.
-    Overwrites the file if it already exists.
-    Returns a success message or an error string starting with '['.
-    """
-    try:
-        resolved = Path(path) if Path(path).is_absolute() else PROJECT_ROOT / path
-        resolved = resolved.resolve()
-
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content, encoding="utf-8")
-
-        size = resolved.stat().st_size
-        logger.info(f"[write_file] Wrote {size} bytes to {resolved}")
-        return f"Successfully wrote {size} bytes to {resolved}"
-
-    except Exception as e:
-        return f"[write_file error: {e}]"
-
-
-# ── Tool 3: edit_file ──────────────────────────────────────────────────────────
-
-class EditFileInput(BaseModel):
-    path:     str = Field(description="Absolute or project-relative path to the file to edit.")
-    old_text: str = Field(description="The exact string to find. Must appear exactly once in the file.")
-    new_text: str = Field(description="The string to replace old_text with.")
-
-
-@tool(args_schema=EditFileInput)
-def edit_file(path: str, old_text: str, new_text: str) -> str:
-    """
-    Replace a unique string in a file with new content.
-    old_text must appear exactly once — this prevents accidental multi-replacement.
-    Returns a unified diff of the change, or an error string starting with '['.
-    """
-    try:
-        resolved = Path(path) if Path(path).is_absolute() else PROJECT_ROOT / path
-        resolved = resolved.resolve()
-
-        if not resolved.exists():
-            return f"[edit_file error: File not found: {resolved}]"
-
-        original = resolved.read_text(encoding="utf-8", errors="replace")
-        count    = original.count(old_text)
-
-        if count == 0:
-            return f"[edit_file error: old_text not found in {resolved}]"
-        if count > 1:
-            return (
-                f"[edit_file error: old_text appears {count} times in {resolved}. "
-                f"Provide more context to make it unique.]"
-            )
-
-        updated = original.replace(old_text, new_text, 1)
-        resolved.write_text(updated, encoding="utf-8")
-
-        # Build a human-readable diff for confirmation
-        diff = difflib.unified_diff(
-            original.splitlines(keepends=True),
-            updated.splitlines(keepends=True),
-            fromfile=f"a/{resolved.name}",
-            tofile=f"b/{resolved.name}",
-            n=3,
-        )
-        diff_text = "".join(diff)
-        if not diff_text:
-            diff_text = "(no visible diff — content may be identical)"
-
-        logger.info(f"[edit_file] Edited {resolved}")
-        return f"Successfully edited {resolved}\n\nDiff:\n{diff_text}"
-
-    except Exception as e:
-        return f"[edit_file error: {e}]"
-
-
-# ── Tool 4: list_dir ───────────────────────────────────────────────────────────
-
-class ListDirInput(BaseModel):
-    path: str = Field(description="Absolute or project-relative path to list.")
-
-
-@tool(args_schema=ListDirInput)
-def list_dir(path: str) -> str:
-    """
-    List the contents of a directory as a formatted tree.
-    Shows files and subdirectories. Skips hidden files (starting with '.'),
-    __pycache__, node_modules, and .venv / venv directories.
-    Returns an error string starting with '[' on failure.
-    """
-    SKIP_DIRS  = {"__pycache__", "node_modules", ".venv", "venv", ".git"}
-    SKIP_FILES = {".DS_Store", "Thumbs.db"}
-
-    try:
-        resolved = Path(path) if Path(path).is_absolute() else PROJECT_ROOT / path
-        resolved = resolved.resolve()
-
-        if not resolved.exists():
-            return f"[list_dir error: Path not found: {resolved}]"
-        if not resolved.is_dir():
-            return f"[list_dir error: Not a directory: {resolved}]"
-
-        lines = [f"{resolved}/"]
-
-        def _walk(directory: Path, prefix: str):
-            try:
-                entries = sorted(directory.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
-            except PermissionError:
-                lines.append(f"{prefix}[permission denied]")
-                return
-
-            entries = [
-                e for e in entries
-                if e.name not in SKIP_FILES
-                and e.name not in SKIP_DIRS
-                and not e.name.startswith(".")
-            ]
-
-            for i, entry in enumerate(entries):
-                connector = "└── " if i == len(entries) - 1 else "├── "
-                if entry.is_dir():
-                    lines.append(f"{prefix}{connector}{entry.name}/")
-                    extension = "    " if i == len(entries) - 1 else "│   "
-                    _walk(entry, prefix + extension)
-                else:
-                    size  = entry.stat().st_size
-                    size_str = f"{size:,} B" if size < 1024 else f"{size / 1024:.1f} KB"
-                    lines.append(f"{prefix}{connector}{entry.name}  ({size_str})")
-
-        _walk(resolved, "")
-        return "\n".join(lines)
-
-    except Exception as e:
-        return f"[list_dir error: {e}]"
-
 
 # ── Tool 5: glob_search ────────────────────────────────────────────────────────
 
@@ -276,9 +191,9 @@ def glob_search(pattern: str, base_path: str = "") -> str:
     """
     try:
         if base_path:
-            base = Path(base_path) if Path(base_path).is_absolute() else PROJECT_ROOT / base_path
+            base = _resolve_tool_path(base_path)
         else:
-            base = PROJECT_ROOT
+            base = _workspace_root()
 
         base = base.resolve()
 
@@ -322,8 +237,7 @@ def grep_search(pattern: str, path: str, file_pattern: str = "*.py") -> str:
     Returns an error string starting with '[' on failure.
     """
     try:
-        resolved = Path(path) if Path(path).is_absolute() else PROJECT_ROOT / path
-        resolved = resolved.resolve()
+        resolved = _resolve_tool_path(path)
 
         if not resolved.exists():
             return f"[grep_search error: Path not found: {resolved}]"
@@ -389,8 +303,6 @@ def execute_shell(command: str, working_dir: str = "", timeout: int = DEFAULT_SH
     """
     Execute a shell command and return its output (stdout + stderr) and exit code.
     Blocked patterns (rm -rf, format c:, etc.) are rejected immediately.
-    Python/pytest/pip commands are automatically redirected to the gemma_test
-    conda environment if currently running inside gemma_swarm.
     Timeout is capped at 120 seconds.
     Returns output + exit code, or an error string starting with '['.
     """
@@ -404,12 +316,11 @@ def execute_shell(command: str, working_dir: str = "", timeout: int = DEFAULT_SH
     # Redirect to test env if needed
     safe_command = _prefix_for_test_env(command)
 
-    # Resolve working directory
+    # Resolve working directory — defaults to active workspace root
     if working_dir:
-        cwd = Path(working_dir) if Path(working_dir).is_absolute() else PROJECT_ROOT / working_dir
-        cwd = cwd.resolve()
+        cwd = _resolve_tool_path(working_dir)
     else:
-        cwd = PROJECT_ROOT
+        cwd = _workspace_root()
 
     if not cwd.exists():
         return f"[execute_shell error: Working directory not found: {cwd}]"
@@ -417,21 +328,83 @@ def execute_shell(command: str, working_dir: str = "", timeout: int = DEFAULT_SH
     logger.info(f"[execute_shell] Running: {safe_command!r} in {cwd}")
 
     try:
-        use_shell = platform.system() == "Windows"
-
-        result = subprocess.run(
-            safe_command if use_shell else safe_command.split(),
+        # Always use shell=True: safe_command is a string (not a list), shell handles
+        # spaces in paths correctly on all platforms, and BLOCKED_PATTERNS guards safety.
+        proc = subprocess.Popen(
+            safe_command,
             cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            shell=use_shell,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env={**os.environ},
         )
 
-        stdout   = result.stdout.strip()
-        stderr   = result.stderr.strip()
-        exitcode = result.returncode
+        # Queues to collect output from background drain threads
+        stdout_queue = Queue()
+        stderr_queue = Queue()
+
+        def _drain_pipe(pipe, queue):
+            """Read lines from a pipe and put them into a queue until EOF."""
+            for line in iter(pipe.readline, b''):
+                queue.put(line)
+            pipe.close()
+
+        # Start daemon threads to drain stdout/stderr continuously
+        threading.Thread(target=_drain_pipe, args=(proc.stdout, stdout_queue), daemon=True).start()
+        threading.Thread(target=_drain_pipe, args=(proc.stderr, stderr_queue), daemon=True).start()
+
+        # Poll every 0.2s so a cancel event kills the process almost immediately
+        # instead of waiting for the full timeout.
+        elapsed = 0.0
+        poll_interval = 0.2
+        cancelled = False
+        while elapsed < timeout:
+            ret = proc.poll()
+            if ret is not None:
+                break  # process finished naturally
+            cancel = _active_cancel_event
+            if cancel and cancel.is_set():
+                proc.kill()
+                proc.wait()
+                cancelled = True
+                break
+            threading.Event().wait(poll_interval)
+            elapsed += poll_interval
+        else:
+            # Timeout reached without finishing
+            proc.kill()
+            proc.wait()
+
+        if cancelled:
+            return "[execute_shell cancelled]"
+
+        if proc.poll() is None:
+            # Shouldn't happen, but guard
+            proc.kill()
+            proc.wait()
+
+        # Collect all drained output from queues
+        stdout_chunks = []
+        stderr_chunks = []
+
+        while True:
+            try:
+                stdout_chunks.append(stdout_queue.get_nowait())
+            except Empty:
+                break
+
+        while True:
+            try:
+                stderr_chunks.append(stderr_queue.get_nowait())
+            except Empty:
+                break
+
+        stdout_bytes = b''.join(stdout_chunks)
+        stderr_bytes = b''.join(stderr_chunks)
+
+        stdout = (stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else "").strip()
+        stderr = (stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else "").strip()
+        exitcode = proc.returncode
 
         parts = [f"Exit code: {exitcode}"]
         if stdout:
@@ -446,8 +419,175 @@ def execute_shell(command: str, working_dir: str = "", timeout: int = DEFAULT_SH
         return output
 
     except subprocess.TimeoutExpired:
-        return f"[execute_shell error: Command timed out after {timeout}s: '{safe_command}']"
+        return f"[execute_shell error: Command timed out after {timeout}s: '{safe_command}']"  # fallback, should not be reached
     except FileNotFoundError as e:
         return f"[execute_shell error: Command not found: {e}]"
     except Exception as e:
         return f"[execute_shell error: {e}]"
+
+
+# ── Tool 8: read_files ─────────────────────────────────────────────────────────
+
+class ReadFilesInput(BaseModel):
+    paths: list[str] = Field(
+        description="List of file paths to read (absolute or project-relative). Up to 10 files at once."
+    )
+
+
+@tool(args_schema=ReadFilesInput)
+def read_files(paths: list[str]) -> str:
+    """
+    Read a single or multiple files in a single call and return all their contents.
+    Returns each file's content under a clear header, or an inline error for
+    any file that cannot be read (other files still return normally).
+    Up to 10 paths per call.
+    """
+    if not paths:
+        return "[read_files error: paths list is empty]"
+    if len(paths) > 10:
+        return "[read_files error: too many paths — max 10 per call]"
+
+    sections = []
+    for path in paths:
+        try:
+            resolved = _resolve_tool_path(path)
+            if not resolved.exists():
+                sections.append(f"File: {path}\n[error: file not found: {resolved}]\n")
+                continue
+            if not resolved.is_file():
+                sections.append(f"File: {path}\n[error: not a file: {resolved}]\n")
+                continue
+            content = resolved.read_text(encoding="utf-8", errors="replace")
+            if len(content) > MAX_READ_CHARS:
+                content = content[:MAX_READ_CHARS] + f"\n\n[truncated at {MAX_READ_CHARS} chars]"
+            sections.append(f"File: {path}\nContent:\n{content}\n")
+        except Exception as e:
+            sections.append(f"File: {path}\n[error reading file: {e}]\n")
+
+    return ("\n" + "─" * 60 + "\n").join(sections)
+
+
+# ── Tool 9: write_files ────────────────────────────────────────────────────────
+
+class WriteFilesEntry(BaseModel):
+    path:    str = Field(description="File path to write (absolute or project-relative).")
+    content: str = Field(description="Full content to write to this file.")
+
+
+class WriteFilesInput(BaseModel):
+    files: list[WriteFilesEntry] = Field(
+        description="List of {path, content} pairs. Each file is written (created or overwritten). Up to 10 files at once."
+    )
+
+
+@tool(args_schema=WriteFilesInput)
+def write_files(files: list[WriteFilesEntry]) -> str:
+    """
+    Write a single or multiple files in a single call.
+    Use this when you need to create or overwrite a single or several files at once — saves one LLM turn per extra file.
+    Each entry needs a path and full content. Parent directories are created
+    automatically. Up to 10 files per call.
+    Returns a per-file success/error report.
+    """
+    if not files:
+        return "[write_files error: files list is empty]"
+    if len(files) > 10:
+        return "[write_files error: too many files — max 10 per call]"
+
+    results = []
+    for entry in files:
+        try:
+            resolved = _resolve_tool_path(entry.path)
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_text(entry.content, encoding="utf-8")
+            size = resolved.stat().st_size
+            logger.info(f"[write_files] Wrote {size} bytes to {resolved}")
+            results.append(f"  ✓ {entry.path}  ({size:,} bytes)")
+        except Exception as e:
+            results.append(f"  ✗ {entry.path}  → error: {e}")
+
+    summary = f"write_files: {len(files)} file(s) processed\n" + "\n".join(results)
+    return summary
+
+
+# ── Tool 10: edit_files ────────────────────────────────────────────────────────
+
+class EditFilesEntry(BaseModel):
+    path:     str = Field(description="File path to edit (absolute or project-relative).")
+    old_text: str = Field(description="Exact string to replace — must appear exactly once in the file.")
+    new_text: str = Field(description="String to replace old_text with.")
+
+
+class EditFilesInput(BaseModel):
+    edits: list[EditFilesEntry] = Field(
+        description="List of {path, old_text, new_text} edits. Multiple edits to the same file are applied in order. Up to 20 edits at once."
+    )
+
+
+@tool(args_schema=EditFilesInput)
+def edit_files(edits: list[EditFilesEntry]) -> str:
+    """
+    Apply multiple find-and-replace edits across one or more files in a single call.
+    Each edit needs path, old_text (must appear exactly once), and new_text.
+    Multiple edits to the same file are applied sequentially in the order given.
+    Up to 20 edits per call. Returns a per-edit diff or error report.
+    """
+    if not edits:
+        return "[edit_files error: edits list is empty]"
+    if len(edits) > 20:
+        return "[edit_files error: too many edits — max 20 per call]"
+
+    # Cache file contents so multiple edits to the same file are applied in-memory
+    # before writing, rather than re-reading from disk between edits.
+    file_cache: dict[str, str] = {}   # resolved path str → current content
+    results = []
+
+    for entry in edits:
+        try:
+            resolved = _resolve_tool_path(entry.path)
+            path_key = str(resolved)
+
+            if path_key not in file_cache:
+                if not resolved.exists():
+                    results.append(f"  ✗ {entry.path}: file not found")
+                    continue
+                file_cache[path_key] = resolved.read_text(encoding="utf-8", errors="replace")
+
+            original = file_cache[path_key]
+            count = original.count(entry.old_text)
+
+            if count == 0:
+                results.append(f"  ✗ {entry.path}: old_text not found")
+                continue
+            if count > 1:
+                results.append(f"  ✗ {entry.path}: old_text appears {count} times — must be unique")
+                continue
+
+            updated = original.replace(entry.old_text, entry.new_text, 1)
+            file_cache[path_key] = updated
+
+            # Build a minimal diff for confirmation
+            diff = difflib.unified_diff(
+                original.splitlines(keepends=True),
+                updated.splitlines(keepends=True),
+                fromfile=f"a/{resolved.name}",
+                tofile=f"b/{resolved.name}",
+                n=2,
+            )
+            diff_text = "".join(diff) or "(no visible diff)"
+            results.append(f"  ✓ {entry.path}\n{diff_text}")
+
+        except Exception as e:
+            results.append(f"  ✗ {entry.path}: error — {e}")
+
+    # Flush cache to disk
+    for path_key, content in file_cache.items():
+        try:
+            Path(path_key).write_text(content, encoding="utf-8")
+        except Exception as e:
+            results.append(f"  ✗ write error for {path_key}: {e}")
+            logger.error(f"[edit_files] Failed to write {path_key}: {e}")
+
+    summary = f"edit_files: {len(edits)} edit(s) applied\n" + "\n".join(results)
+    logger.info(f"[edit_files] Applied {len(edits)} edits across {len(file_cache)} file(s)")
+    return summary

@@ -8,7 +8,7 @@ every task to understand what it's working with.
 Tools:
     read_project_structure(root_path, max_depth, exclude_dirs)  — directory tree with sizes
     search_codebase(pattern, root_path, file_extensions)        — regex grep across all source files
-    read_requirements(root_path)                                — parse requirements.txt / pyproject.toml
+    read_requirements(root_path)                                — parse requirements.txt / pyproject.toml etc.
     read_git_log(root_path, n_commits)                          — recent commit history
 
 Usage pattern the agent should follow at the start of every task:
@@ -19,17 +19,20 @@ Usage pattern the agent should follow at the start of every task:
 """
 
 import re
+import json
 import logging
-import platform
+import os
 import subprocess
+import threading
+from queue import Queue, Empty
 from pathlib import Path
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
-from agents_utils.config import PROJECT_ROOT
+from tools.coding_tools import _workspace_root, _resolve_tool_path as _resolve_path
 
 logger = logging.getLogger(__name__)
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# ── Constants ──────────────────────────────────────────────────────────
 
 DEFAULT_MAX_DEPTH    = 4
 MAX_DEPTH_LIMIT      = 8
@@ -49,24 +52,62 @@ DEFAULT_EXTENSIONS = {".py", ".js", ".ts", ".md", ".txt", ".yaml", ".yml", ".jso
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
-def _resolve_path(path: str) -> Path:
-    """Resolve a path — absolute or relative to project root."""
-    p = Path(path)
-    return p.resolve() if p.is_absolute() else (PROJECT_ROOT / path).resolve()
+# _resolve_path is imported from coding_tools above
 
 
 def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
-    """Run a git command and return (returncode, stdout, stderr)."""
+    """Run a git command and return (returncode, stdout, stderr). Safe from deadlocks."""
     cmd = ["git"] + args
     try:
-        result = subprocess.run(
-            cmd,  # always pass as list to avoid shell interpretation issues
+        proc = subprocess.Popen(
+            cmd,
             cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=15,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ},
         )
-        return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+        stdout_queue = Queue()
+        stderr_queue = Queue()
+
+        def _drain_pipe(pipe, queue):
+            for line in iter(pipe.readline, b''):
+                queue.put(line)
+            pipe.close()
+
+        threading.Thread(target=_drain_pipe, args=(proc.stdout, stdout_queue), daemon=True).start()
+        threading.Thread(target=_drain_pipe, args=(proc.stderr, stderr_queue), daemon=True).start()
+
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+        stdout_chunks = []
+        stderr_chunks = []
+
+        while True:
+            try:
+                stdout_chunks.append(stdout_queue.get_nowait())
+            except Empty:
+                break
+
+        while True:
+            try:
+                stderr_chunks.append(stderr_queue.get_nowait())
+            except Empty:
+                break
+
+        stdout_bytes = b''.join(stdout_chunks)
+        stderr_bytes = b''.join(stderr_chunks)
+
+        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+
+        return proc.returncode, stdout.strip(), stderr.strip()
+
     except subprocess.TimeoutExpired:
         return -1, "", "git command timed out"
     except FileNotFoundError:
@@ -99,7 +140,7 @@ def read_project_structure(root_path: str = "", max_depth: int = DEFAULT_MAX_DEP
     max_depth = min(max(1, max_depth), MAX_DEPTH_LIMIT)
 
     try:
-        root = _resolve_path(root_path) if root_path else PROJECT_ROOT
+        root = _resolve_path(root_path) if root_path else _workspace_root()
 
         if not root.exists():
             return f"[read_project_structure error: Path not found: {root}]"
@@ -143,9 +184,21 @@ def read_project_structure(root_path: str = "", max_depth: int = DEFAULT_MAX_DEP
                     try:
                         size = entry.stat().st_size
                         size_str = f"{size:,} B" if size < 1024 else f"{size / 1024:.1f} KB"
+                        # Add character count for text-like files so agent knows if file is too large
+                        # (helps determine if subagent should be spawned for files > 80k chars)
+                        char_str = ""
+                        if entry.suffix in (".py", ".js", ".ts", ".md", ".txt",
+                                            ".yaml", ".yml", ".json", ".toml",
+                                            ".html", ".css", ".sh", ".env"):
+                            try:
+                                content = entry.read_text(encoding="utf-8", errors="replace")
+                                char_count = len(content)
+                                char_str = f", {char_count:,} chars"
+                            except Exception:
+                                pass
+                        lines.append(f"{prefix}{connector}{entry.name}  ({size_str}{char_str})")
                     except OSError:
-                        size_str = "?"
-                    lines.append(f"{prefix}{connector}{entry.name}  ({size_str})")
+                        lines.append(f"{prefix}{connector}{entry.name}")
 
         _walk(root, "", 1)
         lines.append(f"\n{counts['dirs']} directories, {counts['files']} files")
@@ -181,7 +234,7 @@ def search_codebase(pattern: str, root_path: str = "", file_extensions: list[str
     extensions = set(file_extensions) if file_extensions else DEFAULT_EXTENSIONS
 
     try:
-        root = _resolve_path(root_path) if root_path else PROJECT_ROOT
+        root = _resolve_path(root_path) if root_path else _workspace_root()
 
         if not root.exists():
             return f"[search_codebase error: Path not found: {root}]"
@@ -244,44 +297,55 @@ def search_codebase(pattern: str, root_path: str = "", file_extensions: list[str
 # ── Tool 3: read_requirements ─────────────────────────────────────────────────
 
 class ReadRequirementsInput(BaseModel):
-    root_path: str = Field(default="", description="Project root to search for requirements files. Defaults to project root.")
+    root_path: str = Field(default="", description="Project root to search for dependency files (requirements.txt, pyproject.toml, package.json, etc.). Defaults to project root.")
 
 
 @tool(args_schema=ReadRequirementsInput)
 def read_requirements(root_path: str = "") -> str:
     """
-    Parse and return the project's dependency list from requirements.txt
-    and/or pyproject.toml. Returns a clean, structured view of all
-    declared dependencies and their version constraints.
+    Parse and return the project's dependency list from Python AND JS/TS
+    dependency files (requirements.txt, pyproject.toml, package.json, etc.).
+    Returns a clean, structured view of all declared dependencies and their
+    version constraints, clearly labeled by language and source file.
     Call this before writing any code that installs or uses packages —
     you need to know what's already declared before adding new deps.
+    Call with no arguments to scan the entire workspace, or provide a
+    specific root_path to narrow the search.
     Returns an error string starting with '[' on failure.
     """
     try:
-        root = _resolve_path(root_path) if root_path else PROJECT_ROOT
+        root = _resolve_path(root_path) if root_path else _workspace_root()
 
         if not root.exists():
             return f"[read_requirements error: Path not found: {root}]"
 
         sections = []
 
-        # ── requirements.txt ──────────────────────────────────────────────────
-        req_file = root / "requirements.txt"
-        if req_file.exists():
+        # Scan root and all subdirectories (skip noise dirs) for dependency files.
+        _skip = {"__pycache__", "node_modules", ".venv", "venv", ".git",
+                 ".tox", ".pytest_cache", ".mypy_cache", "dist", "build"}
+
+        req_files       = sorted(p for p in root.rglob("requirements*.txt")
+                                   if not any(part in _skip for part in p.parts))
+        pyproject_files = sorted(p for p in root.rglob("pyproject.toml")
+                                  if not any(part in _skip for part in p.parts))
+        pipfile_files    = sorted(p for p in root.rglob("Pipfile")
+                                  if not any(part in _skip for part in p.parts))
+        setup_files     = sorted(p for p in root.rglob("setup.py")
+                                  if not any(part in _skip for part in p.parts))
+        setup_cfg_files = sorted(p for p in root.rglob("setup.cfg")
+                                  if not any(part in _skip for part in p.parts))
+
+        def _parse_req_txt(req_file: Path) -> str | None:
             content = req_file.read_text(encoding="utf-8", errors="replace")
             if len(content) > MAX_REQUIREMENTS_CHARS:
                 content = content[:MAX_REQUIREMENTS_CHARS] + "\n...[truncated]"
-
-            lines   = content.splitlines()
-            deps    = []
-            current_section = None
-
-            for line in lines:
+            deps, current_section = [], None
+            for line in content.splitlines():
                 stripped = line.strip()
                 if not stripped:
                     continue
                 if stripped.startswith("#"):
-                    # Use comment headers as section names
                     header = stripped.lstrip("#").strip()
                     if header:
                         current_section = header
@@ -289,26 +353,31 @@ def read_requirements(root_path: str = "") -> str:
                 if stripped.startswith("-r ") or stripped.startswith("--"):
                     deps.append(f"  {stripped}  (include/flag)")
                     continue
-                # Parse package==version or package>=version etc.
                 deps.append(f"  {stripped}")
+            if not deps:
+                return None
+            try:
+                rel = req_file.relative_to(root)
+            except ValueError:
+                rel = req_file
+            block = f"requirements.txt ({rel}):\n"
+            if current_section:
+                block += f"  (last section: {current_section})\n"
+            block += "\n".join(deps)
+            return block
 
-            if deps:
-                block = "requirements.txt:\n"
-                if current_section:
-                    block += f"  (last section: {current_section})\n"
-                block += "\n".join(deps)
+        for req_file in req_files:
+            block = _parse_req_txt(req_file)
+            if block:
                 sections.append(block)
 
-        # ── pyproject.toml ────────────────────────────────────────────────────
-        pyproject = root / "pyproject.toml"
-        if pyproject.exists():
-            content = pyproject.read_text(encoding="utf-8", errors="replace")
+        def _parse_pyproject(pyproject_file: Path) -> str | None:
+            content = pyproject_file.read_text(encoding="utf-8", errors="replace")
             if len(content) > MAX_REQUIREMENTS_CHARS:
                 content = content[:MAX_REQUIREMENTS_CHARS] + "\n...[truncated]"
 
-            # Extract [project.dependencies] or [tool.poetry.dependencies] section
-            dep_lines   = []
-            in_deps     = False
+            dep_lines = []
+            in_deps = False
             section_pat = re.compile(r"^\[(.+)\]")
             dep_sections = {
                 "project.dependencies",
@@ -317,24 +386,189 @@ def read_requirements(root_path: str = "") -> str:
                 "project.optional-dependencies",
             }
 
+            in_project = False
             for line in content.splitlines():
                 m = section_pat.match(line.strip())
                 if m:
-                    in_deps = m.group(1).lower() in dep_sections
-                    if in_deps:
-                        dep_lines.append(f"\n  [{m.group(1)}]")
+                    section = m.group(1)
+                    section_lower = section.lower()
+                    if section_lower in dep_sections:
+                        in_deps = True
+                        dep_lines.append(f"\n  [{section}]")
+                    elif section_lower == "project":
+                        in_project = True
+                        in_deps = False
+                        dep_lines.append(f"\n  [project]")
+                    else:
+                        in_deps = False
+                        in_project = False
                     continue
-                if in_deps and line.strip() and not line.strip().startswith("["):
+                if in_deps and line.strip():
                     dep_lines.append(f"  {line.strip()}")
+                elif in_project and line.strip():
+                    stripped = line.strip()
+                    if stripped.startswith("dependencies") or stripped.startswith("optional-dependencies"):
+                        in_deps = True
+                        dep_lines.append(f"  {stripped}")
+                    elif in_deps and (stripped.startswith('"') or stripped.startswith("'")):
+                        dep_lines.append(f"  {stripped}")
 
-            if dep_lines:
-                sections.append("pyproject.toml dependencies:" + "\n".join(dep_lines))
+            if not dep_lines:
+                return None
+
+            try:
+                rel = pyproject_file.relative_to(root)
+            except ValueError:
+                rel = pyproject_file
+
+            block = f"pyproject.toml ({rel}):\n"
+            block += "".join(dep_lines)
+            return block
+
+        for pyproject_file in pyproject_files:
+            block = _parse_pyproject(pyproject_file)
+            if block:
+                sections.append(block)
+
+        def _parse_pipfile(pipfile: Path) -> str | None:
+            try:
+                import tomllib
+            except ImportError:
+                return None
+            try:
+                data = tomllib.loads(pipfile.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+
+            dep_lines = []
+            for section, key in [("packages", "default"), ("dev-packages", "develop")]:
+                if section in data:
+                    deps = data[section]
+                    if deps:
+                        dep_lines.append(f"\n  [{key}]")
+                        for pkg, spec in sorted(deps.items()):
+                            if isinstance(spec, str):
+                                dep_lines.append(f"  {pkg}{spec}")
+                            elif isinstance(spec, dict) and "version" in spec:
+                                dep_lines.append(f"  {pkg}{spec['version']}")
+                            else:
+                                dep_lines.append(f"  {pkg}")
+
+            if not dep_lines:
+                return None
+
+            try:
+                rel = pipfile.relative_to(root)
+            except ValueError:
+                rel = pipfile
+            return f"Pipfile ({rel}):\n" + "\n".join(dep_lines)
+
+        for pipfile in pipfile_files:
+            block = _parse_pipfile(pipfile)
+            if block:
+                sections.append(block)
+
+        def _parse_setup_py(setup_file: Path) -> str | None:
+            content = setup_file.read_text(encoding="utf-8", errors="replace")
+            dep_lines = []
+
+            install_requires = re.search(r"install_requires\s*=\s*\[([^\]]+)\]", content, re.DOTALL)
+            if install_requires:
+                dep_lines.append("\n  [install_requires]")
+                for dep in install_requires.group(1).split(","):
+                    dep = dep.strip().strip("'\"").strip()
+                    if dep:
+                        dep_lines.append(f"  {dep}")
+
+            extras_require = re.search(r"extras_require\s*=\s*\{([^}]+)\}", content, re.DOTALL)
+            if extras_require:
+                in_extras = False
+                for line in extras_require.group(1).split(","):
+                    if "=" in line:
+                        if not in_extras:
+                            dep_lines.append("\n  [extras_require]")
+                            in_extras = True
+                        dep_lines.append(f"  {line.strip()}")
+
+            if not dep_lines:
+                return None
+
+            try:
+                rel = setup_file.relative_to(root)
+            except ValueError:
+                rel = setup_file
+            return f"setup.py ({rel}):\n" + "\n".join(dep_lines)
+
+        for setup_file in setup_files:
+            block = _parse_setup_py(setup_file)
+            if block:
+                sections.append(block)
+
+        def _parse_setup_cfg(setup_cfg_file: Path) -> str | None:
+            content = setup_cfg_file.read_text(encoding="utf-8", errors="replace")
+            dep_lines = []
+            in_section = False
+
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    section = stripped[1:-1].lower()
+                    in_section = section in ("options", "options.extras_require")
+                    if in_section:
+                        dep_lines.append(f"\n  [{stripped}]")
+                    continue
+                if in_section and "=" in stripped and not stripped.startswith("#"):
+                    if stripped.split("=")[0].strip() in ("install_requires", "packages"):
+                        dep_lines.append(f"  {stripped}")
+
+            if not dep_lines:
+                return None
+
+            try:
+                rel = setup_cfg_file.relative_to(root)
+            except ValueError:
+                rel = setup_cfg_file
+            return f"setup.cfg ({rel}):\n" + "\n".join(dep_lines)
+
+        for setup_cfg in setup_cfg_files:
+            block = _parse_setup_cfg(setup_cfg)
+            if block:
+                sections.append(block)
+
+        # ── Parse package.json (JS/TS projects) ──────────────────────────────
+        package_json_files = sorted(p for p in root.rglob("package.json")
+                                   if not any(part in _skip for part in p.parts))
+
+        def _parse_package_json(pkg_file: Path) -> str | None:
+            try:
+                data = json.loads(pkg_file.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                return None
+
+            dep_lines = []
+            rel_path = pkg_file.relative_to(root) if pkg_file.is_relative_to(root) else pkg_file
+
+            for section_key, label in [("dependencies", "dependencies"), ("devDependencies", "devDependencies (dev)")]:
+                if section_key in data and data[section_key]:
+                    dep_lines.append(f"\n  [{label}]")
+                    for pkg, version in sorted(data[section_key].items()):
+                        dep_lines.append(f"  {pkg} {version}")
+
+            if not dep_lines:
+                return None
+
+            return f"package.json ({rel_path}):\n" + "\n".join(dep_lines)
+
+        for pkg_file in package_json_files:
+            block = _parse_package_json(pkg_file)
+            if block:
+                sections.append(block)
 
         # ── Nothing found ─────────────────────────────────────────────────────
         if not sections:
             return (
-                f"[read_requirements: No requirements.txt or pyproject.toml found in {root}. "
-                f"This project may not have a standard Python dependency file.]"
+                f"[read_requirements: No requirements.txt, pyproject.toml, Pipfile, setup.py, setup.cfg, or package.json found in {root}. "
+                f"This project may not have a standard dependency file.]"
             )
 
         header = f"Dependencies for project at: {root}\n" + "─" * 60 + "\n\n"
@@ -363,7 +597,7 @@ def read_git_log(root_path: str = "", n_commits: int = DEFAULT_N_COMMITS) -> str
     n_commits = min(max(1, n_commits), MAX_N_COMMITS)
 
     try:
-        root = _resolve_path(root_path) if root_path else PROJECT_ROOT
+        root = _resolve_path(root_path) if root_path else _workspace_root()
 
         if not root.exists():
             return f"[read_git_log error: Path not found: {root}]"

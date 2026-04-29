@@ -69,6 +69,78 @@ IF %ERRORLEVEL% NEQ 0 (
     exit /b
 )
 
+:: ── gemma_test environment (coding agent sandbox) ─────────────────────────────
+echo.
+echo Checking if gemma_test environment exists...
+
+conda env list | findstr "gemma_test" >nul
+IF %ERRORLEVEL% NEQ 0 (
+    echo Creating environment gemma_test...
+    conda create -y -n gemma_test python=3.11
+
+    IF %ERRORLEVEL% NEQ 0 (
+        echo Failed to create gemma_test environment!
+        pause
+        exit /b
+    )
+) ELSE (
+    echo gemma_test environment already exists. Skipping creation.
+)
+
+echo Installing coding agent dependencies into gemma_test...
+conda run -n gemma_test pip install pytest ruff flake8 mypy magika
+
+IF %ERRORLEVEL% NEQ 0 (
+    echo Failed to install coding agent dependencies!
+    pause
+    exit /b
+)
+
+echo gemma_test environment ready.
+
+:: ── Node.js (required for JS/TS project validation) ─────────────────────────────────────────
+echo.
+echo Checking for Node.js installation...
+
+where node >nul 2>&1
+IF %ERRORLEVEL% NEQ 0 (
+    echo Node.js not found. Installing Node.js LTS via winget...
+    winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
+    IF %ERRORLEVEL% NEQ 0 (
+        echo WARNING: Node.js installation failed. JS/TS validation will not be available.
+        echo You can install it manually from https://nodejs.org/
+    ) ELSE (
+        echo Node.js installed. You may need to restart your terminal for PATH to update.
+        echo Installing TypeScript and eslint globally...
+        npm install -g typescript eslint
+    )
+) ELSE (
+    echo Node.js already installed. Skipping.
+    where tsc >nul 2>&1
+    IF %ERRORLEVEL% NEQ 0 (
+        echo TypeScript compiler not found. Installing TypeScript and eslint globally...
+        npm install -g typescript eslint
+    ) ELSE (
+        echo TypeScript compiler already installed. Skipping.
+    )
+)
+
+:: ── TS Analysis Bridge (ts-morph for semantic JS/TS analysis) ──────────────────
+echo.
+echo Installing ts-morph for JS/TS semantic analysis bridge...
+IF EXIST "%SCRIPT_DIR%tools\ts_analysis_bridge\package.json" (
+    pushd "%SCRIPT_DIR%tools\ts_analysis_bridge"
+    npm install --prefer-offline
+    IF %ERRORLEVEL% NEQ 0 (
+        echo WARNING: ts-morph installation failed. JS/TS semantic analysis will not be available.
+    ) ELSE (
+        echo ts-morph bridge ready.
+    )
+    popd
+) ELSE (
+    echo WARNING: ts_analysis_bridge not found, skipping.
+)
+
 echo Creating gemma-swarm.bat...
 
 (

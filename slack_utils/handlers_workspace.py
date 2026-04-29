@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from agents_utils.memory import create_workspace, list_workspaces
-from agents_utils.config import WORKSPACE_ROOT, USER_PREFERENCES_FILE
+from agents_utils.config import ASSISTANT_WORKSPACE_ROOT, USER_PREFERENCES_FILE
 from slack_utils.thread_state import get_thread_state, save_thread_workspace, get_project_original_thread, set_current_session
 
 logger = logging.getLogger(__name__)
@@ -23,13 +23,47 @@ logger = logging.getLogger(__name__)
 
 # ── Block Builders ───────────────────────────────────────────────────────────────
 
+def build_graph_selector_blocks(thread_ts: str) -> list:
+    """
+    Top-level entry screen shown when the bot is first mentioned.
+    User picks between the Supervisor (Assistant) graph or the Coding Agent.
+    """
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "👋 *Welcome to Gemma Swarm!* What would you like to do?",
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type":      "button",
+                    "text":      {"type": "plain_text", "text": "🤖 Assistant", "emoji": True},
+                    "style":     "primary",
+                    "action_id": "select_assistant_graph",
+                    "value":     thread_ts,
+                },
+                {
+                    "type":      "button",
+                    "text":      {"type": "plain_text", "text": "💻 Coding Agent", "emoji": True},
+                    "action_id": "select_coding_graph",
+                    "value":     thread_ts,
+                },
+            ],
+        },
+    ]
+
+
 def build_workspace_blocks(thread_ts: str) -> list:
     """
     Block Kit blocks for workspace selection.
     New Project opens a modal. Existing projects are buttons.
     Also shows "Preferences" button to update anytime.
     """
-    existing = list_workspaces(str(WORKSPACE_ROOT))
+    existing = list_workspaces(str(ASSISTANT_WORKSPACE_ROOT))
 
     blocks = [
         {
@@ -96,6 +130,85 @@ def build_workspace_blocks(thread_ts: str) -> list:
                 "text":      {"type": "plain_text", "text": "⚡ Autonomous", "emoji": True},
                 "action_id": "open_autonomous_settings",
                 "value":     "open_autonomous_settings",
+            },
+        ],
+    })
+
+    return blocks
+
+
+def build_coding_entry_blocks(thread_ts: str) -> list:
+    """
+    Coding Agent entry screen — shown after the user selects the Coding Agent.
+    Uses its own separate coding workspace registry.
+    """
+    from slack_utils.handlers_coding import list_coding_workspaces
+    existing = list_coding_workspaces()
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "💻 *Coding Agent — ready to build*\nPlease select or create a project:",
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type":      "button",
+                    "text":      {"type": "plain_text", "text": "🆕 New Project", "emoji": True},
+                    "style":     "primary",
+                    "action_id": "coding_new_project",
+                    "value":     thread_ts,
+                },
+            ],
+        },
+    ]
+
+    if existing:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*Or continue an existing project:*"},
+        })
+        options = [
+            {"text": {"type": "plain_text", "text": name}, "value": name}
+            for name in existing[:100]
+        ]
+        blocks.append({
+            "type": "input",
+            "block_id": "coding_workspace_select_block",
+            "label": {"type": "plain_text", "text": "Select a project"},
+            "element": {
+                "type":        "static_select",
+                "action_id":   "coding_existing_select",
+                "placeholder": {"type": "plain_text", "text": "Select a project..."},
+                "options":     options,
+            },
+        })
+
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*Options:*"}})
+    blocks.append({
+        "type": "actions",
+        "elements": [
+            {
+                "type":      "button",
+                "text":      {"type": "plain_text", "text": "⚙️ Preferences", "emoji": True},
+                "action_id": "global_user_prefs",
+                "value":     thread_ts,
+            },
+            {
+                "type":      "button",
+                "text":      {"type": "plain_text", "text": "⚡ Autonomous", "emoji": True},
+                "action_id": "open_autonomous_settings",
+                "value":     "open_autonomous_settings",
+            },
+            {
+                "type":      "button",
+                "text":      {"type": "plain_text", "text": "🛠️ Coding Settings", "emoji": True},
+                "action_id": "open_coding_settings",
+                "value":     thread_ts,
             },
         ],
     })
@@ -344,6 +457,44 @@ def register_workspace_handlers(app, run_agent_fn=None):
     # Store run_agent function for use in handlers
     _run_agent = run_agent_fn
     
+    @app.action("select_assistant_graph")
+    def handle_select_assistant(ack, body, client):
+        """User chose the Assistant graph — show workspace selector."""
+        ack()
+        thread_ts = body["actions"][0]["value"]
+        channel   = body["channel"]["id"]
+        state     = get_thread_state(thread_ts)
+        try:
+            client.chat_update(
+                channel=channel,
+                ts=state.workspace_msg_ts,
+                text="🤖 Assistant selected. Please choose a workspace:",
+                blocks=build_workspace_blocks(thread_ts),
+            )
+        except Exception as e:
+            logger.error(f"[slack] Could not switch to assistant screen: {e}")
+
+    @app.action("select_coding_graph")
+    def handle_select_coding(ack, body, client):
+        """User chose the Coding Agent — show coding entry screen."""
+        ack()
+        thread_ts = body["actions"][0]["value"]
+        channel   = body["channel"]["id"]
+        state     = get_thread_state(thread_ts)
+        state.coding_mode    = True
+        state.pending_channel = channel
+        state.active_channel  = channel
+        state.channel_id      = channel
+        try:
+            client.chat_update(
+                channel=channel,
+                ts=state.workspace_msg_ts,
+                text="💻 Coding Agent selected.",
+                blocks=build_coding_entry_blocks(thread_ts),
+            )
+        except Exception as e:
+            logger.error(f"[slack] Could not switch to coding screen: {e}")
+
     @app.action("workspace_new")
     def handle_workspace_new(ack, body, client):
         ack()
@@ -370,7 +521,7 @@ def register_workspace_handlers(app, run_agent_fn=None):
         channel = state.pending_channel
 
         try:
-            workspace_path = create_workspace(str(WORKSPACE_ROOT), project_name)
+            workspace_path = create_workspace(str(ASSISTANT_WORKSPACE_ROOT), project_name)
         except Exception as e:
             logger.error(f"[slack] Could not create workspace: {e}")
             try:
@@ -408,7 +559,7 @@ def register_workspace_handlers(app, run_agent_fn=None):
         activate_workspace(
             thread_ts=thread_ts,
             channel=channel,
-            workspace_path=str(WORKSPACE_ROOT / project_name),
+            workspace_path=str(ASSISTANT_WORKSPACE_ROOT / project_name),
             project_name=project_name,
             client=client,
             run_agent_fn=_run_agent,

@@ -26,6 +26,7 @@ import time
 import logging
 import threading
 import subprocess
+from queue import Queue, Empty
 import urllib.parse
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -446,15 +447,59 @@ def _convert_image(src_path: Path) -> Path:
 def _convert_video(src_path: Path) -> Path:
     dst_path = src_path.with_suffix(".mp4")
     try:
-        result = subprocess.run(
-            ["ffmpeg", "-i", str(src_path), "-c:v", "libx264",
-             "-c:a", "aac", str(dst_path), "-y"],
-            capture_output=True, text=True, timeout=120,
+        cmd = ["ffmpeg", "-i", str(src_path), "-c:v", "libx264",
+               "-c:a", "aac", str(dst_path), "-y"]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ},
         )
-        if result.returncode != 0:
-            raise LinkedInMediaError(f"ffmpeg error: {result.stderr[:200]}")
+
+        stdout_queue = Queue()
+        stderr_queue = Queue()
+
+        def _drain_pipe(pipe, queue):
+            for line in iter(pipe.readline, b''):
+                queue.put(line)
+            pipe.close()
+
+        threading.Thread(target=_drain_pipe, args=(proc.stdout, stdout_queue), daemon=True).start()
+        threading.Thread(target=_drain_pipe, args=(proc.stderr, stderr_queue), daemon=True).start()
+
+        try:
+            proc.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise LinkedInMediaError("Video conversion timed out.")
+
+        # Collect output (needed for error message if failure)
+        stdout_chunks = []
+        stderr_chunks = []
+
+        while True:
+            try:
+                stdout_chunks.append(stdout_queue.get_nowait())
+            except Empty:
+                break
+
+        while True:
+            try:
+                stderr_chunks.append(stderr_queue.get_nowait())
+            except Empty:
+                break
+
+        stdout_bytes = b''.join(stdout_chunks)
+        stderr_bytes = b''.join(stderr_chunks)
+
+        if proc.returncode != 0:
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+            raise LinkedInMediaError(f"ffmpeg error: {stderr_text[:200]}")
+
         logger.info(f"[linkedin] Converted: {src_path.name} → {dst_path.name}")
         return dst_path
+
     except FileNotFoundError:
         raise LinkedInMediaError("ffmpeg not found. Please install ffmpeg.")
     except subprocess.TimeoutExpired:

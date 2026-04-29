@@ -109,9 +109,9 @@ def _filter_messages_for_agent(agent_name: str, messages: list, state: dict = No
 
 class BaseAgent(ABC):
 
-    def __init__(self, agent_name: str):
+    def __init__(self, agent_name: str, model_name: str = None):
         self.agent_name = agent_name
-        self.model_name = MODELS[agent_name]
+        self.model_name = model_name or MODELS[agent_name]
 
         self.rate_limiter = RateLimitHandler(model_name=self.model_name)
 
@@ -244,6 +244,7 @@ class BaseAgent(ABC):
         self,
         llm_messages: list,
         max_tool_iterations: int,
+        cancel_event=None,
     ) -> tuple[str, dict | None]:
         """
         Tool loop for Gemma 4 / Gemini using native function calling.
@@ -258,6 +259,7 @@ class BaseAgent(ABC):
           AIMessage(content="final response")   ← no tool_calls → we're done
         """
         consecutive_empty = 0
+        task_complete_detected = False
 
         for iteration in range(max_tool_iterations):
             response = self._call_llm(llm_messages, use_tools=True)
@@ -275,9 +277,18 @@ class BaseAgent(ABC):
                     tool_args = tc.get("args", {})
                     tool_id   = tc.get("id", tool_name)
 
+                    # Check cancel between tool executions
+                    if cancel_event and cancel_event.is_set():
+                        logger.info(f"[{self.agent_name}] Cancel detected mid-tool-loop, stopping.")
+                        return "[cancelled]", None
+
                     logger.info(f"[{self.agent_name}] Tool call (native): {tool_name}")
                     tool_result = self._execute_tool(tool_name, tool_args)
                     logger.info(f"[{self.agent_name}] Tool result: {tool_result[:100]}")
+
+                    # Detect task completion signal from the todo tool
+                    if "TASK_COMPLETE" in tool_result:
+                        task_complete_detected = True
 
                     llm_messages.append(
                         ToolMessage(content=tool_result, tool_call_id=tool_id)
@@ -288,7 +299,8 @@ class BaseAgent(ABC):
             # No tool calls — model is producing a final response
             if raw_text and raw_text.strip():
                 consecutive_empty = 0
-                return raw_text.strip(), None
+                parsed = {"task_complete": True} if task_complete_detected else None
+                return raw_text.strip(), parsed
 
             # Empty response — nudge once, then keep going
             consecutive_empty += 1
@@ -345,19 +357,19 @@ class BaseAgent(ABC):
                 continue
 
             if parsed and self._is_agent_response(parsed):
-                response_text = parsed.get("response", raw_text)
-                if response_text and response_text.strip():
-                    return response_text.strip(), parsed
-                if raw_text and raw_text.strip():
-                    return raw_text.strip(), None
-                # Empty response body — treat as empty and fall through
-                raw_text = ""
+                # Always return parsed so callers get routing fields even when
+                # response is intentionally empty (supervisor MODE A dispatch:
+                # response="", next_node="deep_researcher", requires_deep_research=True).
+                # The empty-response guard must NOT swallow a valid routing dict.
+                response_text = parsed.get("response", "")
+                return response_text.strip(), parsed
 
+            # No valid JSON at all — check for plain-text response
             if raw_text and raw_text.strip():
                 consecutive_empty = 0
                 return raw_text.strip(), None
 
-            # Empty response
+            # Truly empty raw_text — model returned nothing
             consecutive_empty += 1
             if consecutive_empty <= 3:
                 logger.warning(
@@ -382,6 +394,7 @@ class BaseAgent(ABC):
         extra_context: str = "",
         max_tool_iterations: int = MAX_TOOL_ITERATIONS,
         state: dict = None,
+        cancel_event=None,
     ) -> tuple[str, dict | None]:
         """
         Run the agent. Selects native tool loop (Gemma 4/Gemini) or
@@ -412,6 +425,6 @@ class BaseAgent(ABC):
 
         # Route to the appropriate tool loop
         if use_native:
-            return self._run_native_tool_loop(llm_messages, max_tool_iterations)
+            return self._run_native_tool_loop(llm_messages, max_tool_iterations, cancel_event=cancel_event)
         else:
             return self._run_text_json_tool_loop(llm_messages, max_tool_iterations)

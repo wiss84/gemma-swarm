@@ -25,21 +25,16 @@ google-api-core
 requests
 
 # ── File processing ─────────────────────────────────────────────────────────
-Pillow          # For converting images to PNG format
+magika                              # Google AI-powered file type detection (used by coding agent for language routing)
+Pillow                              # For converting images to PNG format
 ffmpeg
-pandas          # For CSV processing
-openpyxl        # For .xlsx Excel file reading (required by pandas)
-PyPDF2          # For PDF text extraction
-python-docx     # For Word document (.docx) reading
-beautifulsoup4  # For Web scraping
-lxml            # For Excel spreadsheet processing and Web scraping
-trafilatura     # For advanced web page content extraction (main content detection)
-
-# ── Unit Tests ─────────────────────────────────────────────────────────
-# Should be installed on gemma_test conda env.
-# New agent Feature is in progress.
-# Should add the  gemma_test conda env. creation  in the setup.bat file and any other packages that coding agent may need for testing.
-pytest          # For running tests
-ruff            # Primary linter
-flake8          # Fallback linter
-mypy            # Type checker
+pandas                              # For CSV processing
+openpyxl                            # For .xlsx Excel file reading (required by pandas)
+PyPDF2                              # For PDF text extraction
+python-docx                         # For Word document (.docx) reading
+beautifulsoup4                      # For Web scraping
+lxml                                # For Excel spreadsheet processing and Web scraping
+trafilatura                         # For advanced web page content extraction (main content detection)
+tree-sitter==0.22                   # For building a concrete syntax tree for a source files
+tree-sitter-language-pack==1.6.2    # Grammer for tree-sitter
+customtkinter                       # to for tokens tracker UI

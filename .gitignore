@@ -58,6 +58,13 @@ tests/
 # batch file
 gemma-swarm.bat
 
+# Node / ts_analysis_bridge
+tools/ts_analysis_bridge/node_modules/
+tools/ts_analysis_bridge/package-lock.json
+
+# Agent runtime notes (auto-generated per session)
+coding_agent/agent_notes.md
+
 # State files
 linkedin_state.json
 thread_registry.json
@@ -67,6 +74,9 @@ Google_creds.json
 google_state.json
 autonomous_settings.json
 research_history.json
+coding_thread_registry.json
+coding_session_settings.json
+agent_context_usage.json
 
 # Test/Coverage
 .pytest_cache/
