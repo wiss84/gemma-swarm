@@ -14,7 +14,7 @@ Built on **Google's Gemma 4 models** (free tier) and powered by completely free 
 
 - 📧 **Email Workflow** — Compose, get feedback, send with interrupts: https://youtu.be/LfiQYaT1l9Q
 - 🤖 **Autonomous Mode** — Background research & LinkedIn posting: https://youtu.be/u5iaSv6Hi2U
-- 💻 **Coding Agent** — Autonomous coding from Slack: https://youtu.be/u5iaSv6Hi2U
+- 💻 **Coding Agent** — Autonomous coding from Slack: https://youtu.be/ZCeozC2UQQc
 
 ---
 
