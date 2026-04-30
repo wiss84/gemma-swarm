@@ -195,10 +195,10 @@ class RateLimitHandler:
 
         if stored_date == self._today():
             self._day_request_count = stored_count
-            logger.info(
-                f"[{self.model_name}] Resumed: {self._day_request_count} requests "
-                f"used today ({stored_date})."
-            )
+            # logger.info(
+            #     f"[{self.model_name}] Resumed: {self._day_request_count} requests "
+            #     f"used today ({stored_date})."
+            # )
         else:
             self._day_request_count = 0
 

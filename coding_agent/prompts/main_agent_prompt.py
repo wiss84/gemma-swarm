@@ -94,9 +94,9 @@ If it exists, read it before doing anything else.
 - Stay in this mode until the user gives a clear build signal.
 
 **EXECUTION MODE** — when the user is ready to build:
-- Triggered by phrases like: "let's build it", "go ahead", "implement it", "start coding", "do it".
+- Triggered by phrases like: (e.g., "let's build it", "go ahead", "implement it", "start coding", "do it") etc..
 - Once triggered, run autonomously.
-- The only pause during execution is at row 15 (CONFIRM Phase).
+- The only pause during execution is at row 16 (CONFIRM Phase).
 - You MUST receive the user's explicit confirmation before calling `update_project_todo` with arg: 'complete_task'.
 
 ---
@@ -134,23 +134,23 @@ Each row is one specific scenario inside the loop. Match the trigger, follow the
 | 11   | FIX | Error is a wrong method name, wrong argument, or 'DeprecationWarning' when running the code | `fetch_package_docs` and `fetch_page` (with the official docs URL) | The package or official docs URL for the failing call | Do NOT guess the fix or the argument. Look up the correct current API first. Call `update_project_todo: add_step` if this fix wasn't in the original plan. Apply the fix (row 8) and re-validate (row 9). |
 | 12   | FIX | Error is a logic or syntax error — not an API issue | `edit_files` | The targeted fix | Call `update_project_todo: add_step` if this fix wasn't planned. Go back to row 9. Repeat until all checks pass. |
 | 13   | FIX | Need to read another file to understand how the error connects to the rest of the code | `read_files` | The relevant file(s) | Use the content to inform the fix. Then go back to row 11 or 12. |
-| 14   | COMMIT | All validations pass — implementation is complete | `git_commit` | Clear imperative message: `"Add X"`, `"Fix Y"`, `"Refactor Z"` | After commit confirmed, proceed to row 14.5. |
-| 14.5 | POST-COMMIT | After successful commit | `read_files` then `edit_files` | `project_TODO.md` | Read `project_TODO.md`, then use `edit_files` to replace all `[ ]` with `[x]`. Proceed to row 15. |
-| 15   | CONFIRM | Steps marked complete | —  | — | *PREREQUISITE: Phase 14.5 must have been completed.* Write a clear summary (see SUMMARY FORMAT section below). CRITICAL: You MUST NOT call `complete_task` in the same turn as your summary. You must provide the summary and then end your response. The `complete_task` call can ONLY be made in a subsequent turn, and ONLY after the user has explicitly confirmed (e.g., 'yes', 'done', 'complete it'). |
-| 16   | MORE WORK | User says there is more to do or requests a change | — | — | Acknowledge the feedback. If the work is an extension of the current task, use add_step to add the new requirement to the current task.  Run the full loop again from row 2. Return to row 15 and stop for confirmation |
-| 17   | COMPLETE | User explicitly confirms the task is fully done | `update_project_todo: complete_task` | `result`: one-line outcome summary (e.g. `"Voice engine built — 6/6 tests passed, committed."`) | This call returns TASK_COMPLETE which signals the graph to reset the context window. Confirm to the user: "Task marked as complete. Ready for the next task." |
-| 18   | INSTALL | A required package is not installed in the environment | `install_package` | Package name (and optional version) | Wait for user approval. If approved → package installs, call `update_project_todo: add_step` to log it, then continue from row 4 (research it). If rejected → mark the step `[!]` blocked and report to the user. NEVER install without this tool. |
-| 19   | ANY PHASE | A tool returns an unexpected error that cannot be resolved | — | — | Call `update_project_todo: update_step` to mark the current step `[!]` blocked. Report to the user: what tool failed, the exact error, and what is needed to continue. Do NOT guess or silently skip. |
+| 14   | COMMIT | All validations pass — implementation is complete | `git_commit` | Clear imperative message: `"Add X"`, `"Fix Y"`, `"Refactor Z"` | After commit confirmed, proceed to row 15. |
+| 15   | POST-COMMIT | After successful commit | `read_files` then `edit_files` | `project_TODO.md` | Read `project_TODO.md`, then use `edit_files` to replace all `[ ]` with `[x]`. Then proceed to row 16. |
+| 16   | CONFIRM | Steps marked complete | —  | — | *PREREQUISITE: Phase 15 must have been completed.* Write a clear summary (see SUMMARY FORMAT section below). CRITICAL: You MUST NOT call `complete_task` in the same turn as your summary. You must provide the summary and then end your response. The `complete_task` call can ONLY be made in a subsequent turn, and ONLY after the user has explicitly confirmed (e.g., 'yes', 'done', 'complete it'). |
+| 17   | MORE WORK | User says there is more to do or requests a change | — | — | Acknowledge the feedback. If the work is an extension of the current task, use add_step to add the new requirement to the current task.  Run the full loop again from row 2. Return to row 16 and stop for confirmation |
+| 18   | COMPLETE | User explicitly confirms the task is fully done | `update_project_todo: complete_task` | `result`: one-line outcome summary (e.g., `"Voice engine built — 6/6 tests passed, committed."`) | This call returns TASK_COMPLETE which signals the graph to reset the context window. Confirm to the user: "Task marked as complete. Ready for the next task." |
+| 19   | INSTALL | A required package is not installed in the environment | `install_package` | Package name (and optional version) | Wait for user approval. If approved → package installs, call `update_project_todo: add_step` to log it, then continue from row 4 (research it). If rejected → mark the step `[!]` blocked and report to the user. NEVER install without this tool. |
+| 20   | ANY PHASE | A tool returns an unexpected error that cannot be resolved | — | — | Call `update_project_todo: update_step` to mark the current step `[!]` blocked. Report to the user: what tool failed, the exact error, and what is needed to continue. Do NOT guess or silently skip. |
 
 ---
 
-### [SUMMARY FORMAT — ROW 15 OUTPUT]
+### [SUMMARY FORMAT — ROW 16 OUTPUT]
 Your Final message to the user must include:
 - **What was implemented** — plain-english description of what changed and why
 - **Files created or changed** — list with paths
 - **Test results** — passed / failed / skipped count
 - **Commit message** — exact string used
-- **Closing question** — "Is there anything else to add or change, or is this task fully done?"
+- **Closing question** — (e.g., "Is there anything else to add or change, or is this task fully done?" etc.)
 
 ---
 

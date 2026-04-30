@@ -128,7 +128,7 @@ class BaseAgent(ABC):
         # For Gemma 3 agents it stays None and the text-JSON path is used instead.
         self.llm_with_tools = None
 
-        logger.info(f"[{self.agent_name}] Initialized: {self.model_name}")
+        # logger.info(f"[{self.agent_name}] Initialized: {self.model_name}")
 
     @abstractmethod
     def get_system_prompt(self) -> str:
@@ -142,10 +142,10 @@ class BaseAgent(ABC):
             # Gemma 4 / Gemini: bind tools to the LLM via the API's native tools parameter.
             # This means tools are NOT injected into the prompt — zero prompt tokens spent.
             self.llm_with_tools = self.llm.bind_tools(tools)
-            logger.info(
-                f"[{self.agent_name}] Native tool calling enabled "
-                f"({len(tools)} tools bound via API)."
-            )
+            # logger.info(
+            #     f"[{self.agent_name}] Native tool calling enabled "
+            #     f"({len(tools)} tools bound via API)."
+            # )
         else:
             # Gemma 3: text-JSON loop, tools schema injected into system prompt.
             self.llm_with_tools = None
@@ -282,12 +282,15 @@ class BaseAgent(ABC):
                         logger.info(f"[{self.agent_name}] Cancel detected mid-tool-loop, stopping.")
                         return "[cancelled]", None
 
-                    logger.info(f"[{self.agent_name}] Tool call (native): {tool_name}")
+                    # logger.info(f"[{self.agent_name}] Tool call (native): {tool_name}")
                     tool_result = self._execute_tool(tool_name, tool_args)
-                    logger.info(f"[{self.agent_name}] Tool result: {tool_result[:100]}")
+                    # logger.info(f"[{self.agent_name}] Tool result: {tool_result[:100]}")
 
-                    # Detect task completion signal from the todo tool
-                    if "TASK_COMPLETE" in tool_result:
+                    # Detect task completion signal from the todo tool.
+                    # Guard: only honour the sentinel when it comes from update_project_todo.
+                    # Any other tool (read_files, execute_shell, etc.) may return source code
+                    # or output that contains the sentinel string — those must be ignored.
+                    if tool_name == "update_project_todo" and "__TASK_COMPLETE__" in tool_result:
                         task_complete_detected = True
 
                     llm_messages.append(
@@ -342,9 +345,9 @@ class BaseAgent(ABC):
             if parsed and self._is_tool_call(parsed):
                 tool_name = parsed.get("tool")
                 tool_args = parsed.get("args", {})
-                logger.info(f"[{self.agent_name}] Tool call (text-JSON): {tool_name}")
+                # logger.info(f"[{self.agent_name}] Tool call (text-JSON): {tool_name}")
                 tool_result = self._execute_tool(tool_name, tool_args)
-                logger.info(f"[{self.agent_name}] Tool result: {tool_result[:100]}")
+                # logger.info(f"[{self.agent_name}] Tool result: {tool_result[:100]}")
                 llm_messages.append(AIMessage(content=raw_text))
                 llm_messages.append(
                     HumanMessage(

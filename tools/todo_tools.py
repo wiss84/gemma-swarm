@@ -399,7 +399,7 @@ def update_project_todo(
                 f"Task: {resolved_name}\n"
                 f"Time: {ts}\n"
                 f"File: {todo_path}\n"
-                f"TASK_COMPLETE"
+                f"__TASK_COMPLETE__"
             )
 
         else:

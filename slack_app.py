@@ -54,6 +54,11 @@ from slack_utils.handlers_coding    import register_coding_handlers, run_coding_
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
+logging.getLogger("autonomous").setLevel(logging.WARNING)
+logging.getLogger("slack_utils").setLevel(logging.WARNING)
+logging.getLogger("coding_agent").setLevel(logging.WARNING)
+logging.getLogger("agents_utils").setLevel(logging.WARNING)
+logging.getLogger("tools").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
