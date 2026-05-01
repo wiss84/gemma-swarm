@@ -115,9 +115,9 @@ class CodingAgent(BaseAgent):
             Set at instantiation — the agent always works within this directory.
     """
 
-    def __init__(self, workspace_path: str = "", model_override: str = "", agent_notes_enabled: bool = True):
+    def __init__(self, workspace_path: str = "", model_override: str = "", agent_notes_enabled: bool = True, status_callback=None):
         effective_model = model_override or MODELS.get("coding_agent")
-        super().__init__(agent_name="coding_agent", model_name=effective_model)
+        super().__init__(agent_name="coding_agent", model_name=effective_model, status_callback=status_callback)
         self.workspace_path = workspace_path
         self.agent_notes_enabled = agent_notes_enabled
 
@@ -231,11 +231,18 @@ class CodingAgent(BaseAgent):
         try:
             subagent = CodingSubagent(workspace_path=effective_dir)
             max_iters = CODING_MAX_TOOL_ITERATIONS.get("coding_subagent", 100)
-            result, _ = subagent.run(
+            result, parsed = subagent.run(
                 messages=[HumanMessage(content=task)],
                 max_tool_iterations=max_iters,
                 state={"workspace_path": effective_dir},
             )
+            
+            # If the subagent hit max iterations, report it clearly to the main agent
+            if parsed and parsed.get("error") == "max_iterations_reached":
+                iters = parsed.get("iterations", max_iters)
+                logger.warning(f"[coding_agent] Subagent hit max iterations ({iters})")
+                return f"[spawn_subagent error: Subagent reached max iterations ({iters}) without completing the task. Result so far: {result}]"
+
             logger.info(
                 f"[coding_agent] Subagent completed | result length={len(result)}"
             )

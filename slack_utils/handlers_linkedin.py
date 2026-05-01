@@ -5,7 +5,8 @@ linkedin_approve / linkedin_reject_feedback / linkedin_feedback_modal
 """
 
 import logging
-from nodes.human_gate import resolve_confirmation, build_linkedin_feedback_modal
+from nodes.human_gate import resolve_confirmation
+from slack_utils.blocks import build_feedback_modal as build_linkedin_feedback_modal
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ def register_linkedin_handlers(app):
         thread_ts  = body["actions"][0]["value"]
         channel    = body["channel"]["id"]
         msg_ts     = body["message"]["ts"]
-        modal      = build_linkedin_feedback_modal(thread_ts)
+        modal      = build_linkedin_feedback_modal(thread_ts, title="LinkedIn Feedback", callback_id="linkedin_feedback_modal")
         try:
             client.views_open(trigger_id=trigger_id, view=modal)
             client.chat_delete(channel=channel, ts=msg_ts)

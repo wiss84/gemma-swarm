@@ -103,7 +103,7 @@ Each row is one specific scenario. Match the trigger, follow the row exactly.
 When a [PLANNER] message exists in history, a multi-step plan has been created.
 Execute subtasks in order:
 1. Find the next pending subtask in the plan.
-2. Set current_subtask to its description and next_node: its assigned agent.
+2. Set current_subtask_id to its ID, current_subtask to its description, and next_node: its assigned agent.
 3. After each agent returns, next_node: the next pending subtask.
 4. Move the subtasks that you can do yourself till the end, so you can respond to the human with the full summary including your own results in a single response.
 5. When ALL subtasks are done → task_complete: true, next_node: output_formatter with a full summary of all results. 
@@ -121,6 +121,7 @@ Respond ONLY with this JSON. No text before or after.
 ```json
 {{
   "response": "Natural language message to the human — empty string if dispatching to agent",
+  "current_subtask_id": 0,
   "current_subtask": "Detailed instructions to the agent — empty string if responding to human",
   "requires_research": false,
   "requires_deep_research": false,

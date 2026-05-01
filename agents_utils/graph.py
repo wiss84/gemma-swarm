@@ -40,7 +40,14 @@ from agents.gmail_agent       import gmail_agent_node, get_gmail_agent
 from nodes.input_router    import input_router_node
 from nodes.guard_rails     import guard_rails_node
 from nodes.validator       import response_validator_node
-from nodes.human_gate      import human_gate_node
+from nodes.human_gate      import (
+    human_gate_node,
+    interrupt_node,
+    email_confirm_node,
+    linkedin_confirm_node,
+    google_confirm_node,
+    general_confirm_node,
+)
 from nodes.output_formatter import output_formatter_node
 
 # Tools
@@ -126,6 +133,21 @@ def set_slack_client(client, channel_fn):
 def _human_gate(state: AgentState) -> dict:
     return human_gate_node(state, client=_slack_client)
 
+def _interrupt_gate(state: AgentState) -> dict:
+    return interrupt_node(state, client=_slack_client)
+
+def _email_confirm(state: AgentState) -> dict:
+    return email_confirm_node(state, client=_slack_client)
+
+def _linkedin_confirm(state: AgentState) -> dict:
+    return linkedin_confirm_node(state, client=_slack_client)
+
+def _google_confirm(state: AgentState) -> dict:
+    return google_confirm_node(state, client=_slack_client)
+
+def _general_confirm(state: AgentState) -> dict:
+    return general_confirm_node(state, client=_slack_client)
+
 
 # ── Routing Functions ──────────────────────────────────────────────────────────
 
@@ -135,9 +157,9 @@ def _should_route_to_human_gate(state: AgentState) -> bool:
 
 
 def _route_after_input_router(state: AgentState) -> str:
-    """Route to human_gate if interrupted, otherwise normal routing."""
+    """Route to interrupt_node if interrupted, otherwise normal routing."""
     if _should_route_to_human_gate(state):
-        return "human_gate"
+        return "interrupt_node"
     if state.get("next_node") == "memory":
         return "memory"
     return "guard_rails"
@@ -145,48 +167,69 @@ def _route_after_input_router(state: AgentState) -> str:
 
 def _route_after_guard_rails(state: AgentState) -> str:
     if _should_route_to_human_gate(state):
-        return "human_gate"
+        return "interrupt_node"
     if state.get("next_node") == "output_formatter":
         return "output_formatter"
     return "task_classifier"
 
 def _route_after_task_classifier(state: AgentState) -> str:
     if _should_route_to_human_gate(state):
-        return "human_gate"
+        return "interrupt_node"
     if state.get("is_complex_task"):
         return "planner"
     return "supervisor"
 
 def _route_after_email_composer(state: AgentState) -> str:
-    return "human_gate"
+    return "email_confirm"
 
 
 def _route_after_validator(state: AgentState) -> str:
     if _should_route_to_human_gate(state):
-        return "human_gate"
+        return "interrupt_node"
     next_node = state.get("next_node", "output_formatter")
     if next_node == "supervisor":   return "supervisor"
-    if next_node == "human_gate":   return "human_gate"
+    if next_node == "human_gate":   return "general_confirm"
     return "output_formatter"
 
 
 def _route_after_supervisor(state: AgentState) -> str:
     if _should_route_to_human_gate(state):
-        return "human_gate"
+        return "interrupt_node"
     next_node = state.get("next_node", "")
-    if next_node == "researcher":        return "researcher"
-    if next_node == "deep_researcher":   return "deep_researcher"
-    if next_node == "email_composer":    return "email_composer"
-    if next_node == "linkedin_composer": return "linkedin_composer"
-    if next_node == "docs_agent":       return "docs_agent"
-    if next_node == "calendar_agent":  return "calendar_agent"
-    if next_node == "sheets_agent":    return "sheets_agent"
-    if next_node == "gmail_agent":     return "gmail_agent"
+    if next_node == "researcher":
+        return "researcher"
+    if next_node == "deep_researcher":
+        return "deep_researcher"
+    if next_node == "email_composer":
+        return "email_composer"
+    if next_node == "linkedin_composer":
+        return "linkedin_composer"
+    if next_node == "docs_agent":
+        return "docs_agent"
+    if next_node == "calendar_agent":
+        return "calendar_agent"
+    if next_node == "sheets_agent":
+        return "sheets_agent"
+    if next_node == "gmail_agent":
+        return "gmail_agent"
+    
+    # If supervisor wants a confirmation for a Google agent
+    if next_node in {"calendar_agent", "docs_agent", "sheets_agent", "gmail_agent"} and state.get("google_requires_confirmation", False):
+        return "google_confirm"
 
     return "validator"
 
 
-def _route_after_human_gate(state: AgentState) -> str:
+def _route_after_interrupt_node(state: AgentState) -> str:
+    """Route after interrupt decision."""
+    decision = state.get("human_decision", "").lower().strip()
+    if decision == "rejected":
+        return "supervisor"
+    return "end"
+
+
+def _route_after_confirm_node(state: AgentState) -> str:
+    """Route after a confirmation decision (email, linkedin, google, general)."""
     decision     = state.get("human_decision", "").lower().strip()
     active_agent = state.get("active_agent", "").lower().strip()
 
@@ -217,7 +260,11 @@ def _build_graph() -> StateGraph:
     graph.add_node("linkedin_composer",  _linkedin_composer)
     graph.add_node("linkedin_send",      _linkedin_send)
     graph.add_node("memory",          _memory)
-    graph.add_node("human_gate",      _human_gate)
+    graph.add_node("interrupt_node",   _interrupt_gate)
+    graph.add_node("email_confirm",    _email_confirm)
+    graph.add_node("linkedin_confirm", _linkedin_confirm)
+    graph.add_node("google_confirm",   _google_confirm)
+    graph.add_node("general_confirm",  _general_confirm)
     graph.add_node("validator",        _validator)
     graph.add_node("output_formatter", _output_formatter)
     graph.add_node("docs_agent",       _docs_agent)
@@ -237,8 +284,9 @@ def _build_graph() -> StateGraph:
         "input_router",
         _route_after_input_router,
         {
-            "memory":      "memory",
-            "guard_rails": "guard_rails",
+            "memory":        "memory",
+            "guard_rails":   "guard_rails",
+            "interrupt_node": "interrupt_node",
         }
     )
 
@@ -249,6 +297,7 @@ def _build_graph() -> StateGraph:
         {
             "task_classifier":  "task_classifier",
             "output_formatter": "output_formatter",
+            "interrupt_node":   "interrupt_node",
         }
     )
 
@@ -257,23 +306,24 @@ def _build_graph() -> StateGraph:
         "task_classifier",
         _route_after_task_classifier,
         {
-            "planner":    "planner",
-            "supervisor": "supervisor",
+            "planner":       "planner",
+            "supervisor":    "supervisor",
+            "interrupt_node": "interrupt_node",
         }
     )
 
     # planner → supervisor (with interrupt check)
     def _route_after_planner(state: AgentState) -> str:
         if _should_route_to_human_gate(state):
-            return "human_gate"
+            return "interrupt_node"
         return "supervisor"
     
     graph.add_conditional_edges(
         "planner",
         _route_after_planner,
         {
-            "human_gate": "human_gate",
-            "supervisor": "supervisor",
+            "interrupt_node": "interrupt_node",
+            "supervisor":     "supervisor",
         }
     )
 
@@ -286,151 +336,184 @@ def _build_graph() -> StateGraph:
             "deep_researcher":   "deep_researcher",
             "email_composer":    "email_composer",
             "linkedin_composer": "linkedin_composer",
-            "human_gate":        "human_gate",
+            "interrupt_node":    "interrupt_node",
             "validator":         "validator",
             "docs_agent":       "docs_agent",
             "calendar_agent":  "calendar_agent",
             "sheets_agent":    "sheets_agent",
             "gmail_agent":     "gmail_agent",
-
         }
     )
 
     # researcher → supervisor (with interrupt check)
     def _route_after_researcher(state: AgentState) -> str:
         if _should_route_to_human_gate(state):
-            return "human_gate"
+            return "interrupt_node"
         return "supervisor"
     
     graph.add_conditional_edges(
         "researcher",
         _route_after_researcher,
         {
-            "human_gate": "human_gate",
-            "supervisor": "supervisor",
+            "interrupt_node": "interrupt_node",
+            "supervisor":     "supervisor",
         }
     )
 
     def _route_after_docs_agent(state: AgentState) -> str:
         if _should_route_to_human_gate(state):
-            return "human_gate"
+            return "interrupt_node"
         return "supervisor"
     
     graph.add_conditional_edges("docs_agent", _route_after_docs_agent, {
-        "human_gate": "human_gate",
-        "supervisor": "supervisor",
+        "interrupt_node": "interrupt_node",
+        "supervisor":     "supervisor",
     })
 
     def _route_after_calendar_agent(state: AgentState) -> str:
         if _should_route_to_human_gate(state):
-            return "human_gate"
+            return "interrupt_node"
         return "supervisor"
     
     graph.add_conditional_edges("calendar_agent", _route_after_calendar_agent, {
-        "human_gate": "human_gate",
-        "supervisor": "supervisor",
+        "interrupt_node": "interrupt_node",
+        "supervisor":     "supervisor",
     })
 
     def _route_after_sheets_agent(state: AgentState) -> str:
         if _should_route_to_human_gate(state):
-            return "human_gate"
+            return "interrupt_node"
         return "supervisor"
     
     graph.add_conditional_edges("sheets_agent", _route_after_sheets_agent, {
-        "human_gate": "human_gate",
-        "supervisor": "supervisor",
+        "interrupt_node": "interrupt_node",
+        "supervisor":     "supervisor",
     })
 
     def _route_after_gmail_agent(state: AgentState) -> str:
         if _should_route_to_human_gate(state):
-            return "human_gate"
+            return "interrupt_node"
         return "supervisor"
     
     graph.add_conditional_edges("gmail_agent", _route_after_gmail_agent, {
-        "human_gate": "human_gate",
-        "supervisor": "supervisor",
+        "interrupt_node": "interrupt_node",
+        "supervisor":     "supervisor",
     })
 
 
     # deep_researcher → supervisor (with interrupt check)
     def _route_after_deep_researcher(state: AgentState) -> str:
         if _should_route_to_human_gate(state):
-            return "human_gate"
+            return "interrupt_node"
         return "supervisor"
     
     graph.add_conditional_edges(
         "deep_researcher",
         _route_after_deep_researcher,
         {
-            "human_gate": "human_gate",
-            "supervisor": "supervisor",
+            "interrupt_node": "interrupt_node",
+            "supervisor":     "supervisor",
         }
     )
 
 
-    # email_composer → human_gate (always)
+    # email_composer → email_confirm (always)
     graph.add_conditional_edges(
         "email_composer",
         _route_after_email_composer,
-        {"human_gate": "human_gate"}
+        {"email_confirm": "email_confirm"}
     )
 
     # human_gate → email_send / linkedin_send (approved) or supervisor (rejected)
     graph.add_conditional_edges(
-        "human_gate",
-        _route_after_human_gate,
+        "interrupt_node",
+        _route_after_interrupt_node,
+        {
+            "supervisor":    "supervisor",
+            "end":           END,
+        }
+    )
+
+    graph.add_conditional_edges(
+        "email_confirm",
+        _route_after_confirm_node,
         {
             "email_send":    "email_send",
+            "supervisor":    "supervisor",
+        }
+    )
+
+    graph.add_conditional_edges(
+        "linkedin_confirm",
+        _route_after_confirm_node,
+        {
             "linkedin_send": "linkedin_send",
             "supervisor":    "supervisor",
+        }
+    )
+
+    graph.add_conditional_edges(
+        "google_confirm",
+        _route_after_confirm_node,
+        {
+            "supervisor":    "supervisor",
+        }
+    )
+
+    graph.add_conditional_edges(
+        "general_confirm",
+        _route_after_confirm_node,
+        {
+            "output_formatter": "output_formatter",
+            "supervisor":       "supervisor",
         }
     )
 
     # email_send → supervisor (with interrupt check)
     def _route_after_email_send(state: AgentState) -> str:
         if _should_route_to_human_gate(state):
-            return "human_gate"
+            return "interrupt_node"
         return "supervisor"
     
     graph.add_conditional_edges(
         "email_send",
         _route_after_email_send,
         {
-            "human_gate": "human_gate",
-            "supervisor": "supervisor",
+            "interrupt_node": "interrupt_node",
+            "supervisor":     "supervisor",
         }
     )
 
-    # linkedin_composer → human_gate (always)
-    graph.add_edge("linkedin_composer", "human_gate")
+    # linkedin_composer → linkedin_confirm (always)
+    graph.add_edge("linkedin_composer", "linkedin_confirm")
 
     # linkedin_send → supervisor (with interrupt check)
     def _route_after_linkedin_send(state: AgentState) -> str:
         if _should_route_to_human_gate(state):
-            return "human_gate"
+            return "interrupt_node"
         return "supervisor"
     
     graph.add_conditional_edges(
         "linkedin_send",
         _route_after_linkedin_send,
         {
-            "human_gate": "human_gate",
-            "supervisor": "supervisor",
+            "interrupt_node": "interrupt_node",
+            "supervisor":     "supervisor",
         }
     )
 
     # memory → supervisor or guard_rails (with interrupt check)
     def _route_after_memory(state: AgentState) -> str:
         if _should_route_to_human_gate(state):
-            return "human_gate"
+            return "interrupt_node"
         return "guard_rails"
     
     graph.add_conditional_edges(
         "memory",
         _route_after_memory,
         {
-            "human_gate": "human_gate",
-            "guard_rails": "guard_rails",
+            "interrupt_node": "interrupt_node",
+            "guard_rails":    "guard_rails",
         }
     )
 
@@ -440,7 +523,8 @@ def _build_graph() -> StateGraph:
         _route_after_validator,
         {
             "supervisor":       "supervisor",
-            "human_gate":       "human_gate",
+            "general_confirm":  "general_confirm",
+            "interrupt_node":   "interrupt_node",
             "output_formatter": "output_formatter",
         }
     )

@@ -17,6 +17,7 @@ class AgentState(TypedDict):
     # ── Task Tracking ──────────────────────────────────────────────────────────
     original_task:   str
     current_subtask: str
+    current_subtask_id: int | None
     subtask_results: dict
     active_agent:    str
     task_complete:   bool
@@ -126,6 +127,7 @@ def default_state(
         messages=[],
         original_task=original_task,
         current_subtask="",
+        current_subtask_id=None,
         subtask_results={},
         active_agent="",
         task_complete=False,

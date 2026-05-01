@@ -164,7 +164,16 @@ LABEL = {
 
 # ── Guard Rails — Blocked Patterns ────────────────────────────────────────────
 
+AGENT_GUARDS = {
+    "human_gate":       "requires_confirmation",
+    "researcher":       "requires_research",
+    "deep_researcher":  "requires_deep_research",
+    "email_composer":   "requires_email",
+    "linkedin_composer": "requires_linkedin",
+}
+
 BLOCKED_PATTERNS = [
+
     "rm -rf",
     "format c:",
     "drop database",

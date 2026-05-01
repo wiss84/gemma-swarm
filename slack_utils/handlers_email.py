@@ -6,7 +6,8 @@ for the email draft review flow.
 """
 
 import logging
-from nodes.human_gate import resolve_confirmation, build_feedback_modal
+from nodes.human_gate import resolve_confirmation
+from slack_utils.blocks import build_feedback_modal
 
 logger = logging.getLogger(__name__)
 

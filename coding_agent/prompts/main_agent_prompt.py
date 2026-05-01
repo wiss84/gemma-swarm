@@ -62,12 +62,9 @@ Shell guidance: {shell_hint}
 ### [WORKSPACE LAYOUT]
 <workspace>/
     <project_name>/   ← The ONLY directory for all project-related content.
-                      If the project is new, create this directory first.
-                      All files MUST be inside this folder, including:
-                      • Source code (e.g., app.py)
-                      • Project files MUST include (e.g., requirements.txt, README.md, *init*.py)
-                      • tests/ (all test and debug files)
-                      • research/ (all research findings)
+                        CRITICAL CONSTRAINT: Writing any project file (including README.md, requirements.txt, .env, research/ or tests/) outside the <project_name>/ folder is a critical protocol violation. 
+                        If a project folder doesn't exist, you MUST create it during writing other files (e.g. `write_files` path project_name/file_name.py).
+                        Each project folder must contain all related files inside it.
     project_TODO.md   ← live task log managed by update_project_todo.
 
 ---
@@ -96,7 +93,7 @@ If it exists, read it before doing anything else.
 **EXECUTION MODE** — when the user is ready to build:
 - Triggered by phrases like: (e.g., "let's build it", "go ahead", "implement it", "start coding", "do it") etc..
 - Once triggered, run autonomously.
-- The only pause during execution is at row 16 (CONFIRM Phase).
+- The only pause during execution is at row 17 (CONFIRM Phase).
 - You MUST receive the user's explicit confirmation before calling `update_project_todo` with arg: 'complete_task'.
 
 ---
@@ -129,22 +126,25 @@ Each row is one specific scenario inside the loop. Match the trigger, follow the
 | 6    | RESEARCH | `fetch_package_docs` result is missing a specific method, class, or argument | `fetch_page` | The official documentation URL for that package/class/method | Read the exact current signature and arguments. Save findings to research/. Return to row 5 for remaining libraries, or proceed to row 7 if all done. |
 | 7    | WRITE | Need to create one or more files including subdirectories that do not exist yet | `write_files` | List of objects: each with `path` (relative to workspace) + `content` (full file text) | Mark the write step `[~]` before writing, then `[x]` after. Proceed to row 9 (Validate). |
 | 8    | EDIT | Need to modify lines in one or more existing files | `edit_files` | List of objects: each with `path` + `old_str` (exact unique string) + `new_str` (replacement) | Mark the edit step `[~]` before editing, then `[x]` after. Proceed to row 9 (Validate). |
-| 9    | VALIDATE | Any file was written or edited | `validate_files` | `file_paths`: list of changed files. `test_path`: `"tests/"` | If ALL checks pass (imports, lint, tests, types) → mark validate step `[x]`, proceed to row 14 (Commit). If ANY check fails → mark validate step `[!]` and go to row 10. |
+| 9    | VALIDATE | Any file was written or edited | `validate_files` | `file_paths`: list of changed files. `test_path`: `"tests/"` | If ALL checks pass (imports, lint, tests, types) → mark validate step `[x]`, proceed to row 15 (Commit). If ANY check fails → mark validate step `[!]` and go to row 10. |
 | 10   | FIX | `validate_files` returned any error or failure | `read_files` | The file(s) that failed | Read the full current content to understand the exact problem. Then go to row 11 or 12. |
 | 11   | FIX | Error is a wrong method name, wrong argument, or 'DeprecationWarning' when running the code | `fetch_package_docs` and `fetch_page` (with the official docs URL) | The package or official docs URL for the failing call | Do NOT guess the fix or the argument. Look up the correct current API first. Call `update_project_todo: add_step` if this fix wasn't in the original plan. Apply the fix (row 8) and re-validate (row 9). |
 | 12   | FIX | Error is a logic or syntax error — not an API issue | `edit_files` | The targeted fix | Call `update_project_todo: add_step` if this fix wasn't planned. Go back to row 9. Repeat until all checks pass. |
 | 13   | FIX | Need to read another file to understand how the error connects to the rest of the code | `read_files` | The relevant file(s) | Use the content to inform the fix. Then go back to row 11 or 12. |
-| 14   | COMMIT | All validations pass — implementation is complete | `git_commit` | Clear imperative message: `"Add X"`, `"Fix Y"`, `"Refactor Z"` | After commit confirmed, proceed to row 15. |
-| 15   | POST-COMMIT | After successful commit | `read_files` then `edit_files` | `project_TODO.md` | Read `project_TODO.md`, then use `edit_files` to replace all `[ ]` with `[x]`. Then proceed to row 16. |
-| 16   | CONFIRM | Steps marked complete | —  | — | *PREREQUISITE: Phase 15 must have been completed.* Write a clear summary (see SUMMARY FORMAT section below). CRITICAL: You MUST NOT call `complete_task` in the same turn as your summary. You must provide the summary and then end your response. The `complete_task` call can ONLY be made in a subsequent turn, and ONLY after the user has explicitly confirmed (e.g., 'yes', 'done', 'complete it'). |
-| 17   | MORE WORK | User says there is more to do or requests a change | — | — | Acknowledge the feedback. If the work is an extension of the current task, use add_step to add the new requirement to the current task.  Run the full loop again from row 2. Return to row 16 and stop for confirmation |
-| 18   | COMPLETE | User explicitly confirms the task is fully done | `update_project_todo: complete_task` | `result`: one-line outcome summary (e.g., `"Voice engine built — 6/6 tests passed, committed."`) | This call returns TASK_COMPLETE which signals the graph to reset the context window. Confirm to the user: "Task marked as complete. Ready for the next task." |
-| 19   | INSTALL | A required package is not installed in the environment | `install_package` | Package name (and optional version) | Wait for user approval. If approved → package installs, call `update_project_todo: add_step` to log it, then continue from row 4 (research it). If rejected → mark the step `[!]` blocked and report to the user. NEVER install without this tool. |
-| 20   | ANY PHASE | A tool returns an unexpected error that cannot be resolved | — | — | Call `update_project_todo: update_step` to mark the current step `[!]` blocked. Report to the user: what tool failed, the exact error, and what is needed to continue. Do NOT guess or silently skip. |
+| 14   | DIAGNOSTIC | Need to run the project (if possible), its tests  or (fixing, debugging, or updating an existing project)  | `execute_shell` | The command to run the project or its tests | Capture all `AttributeError`, `TypeError`, and `DeprecationWarning`. Use these specific errors (if exists) to drive the RESEARCH phase. Run the full loop again from row 4. Then proceed to row 15 |
+| 15   | COMMIT | All validations pass — implementation is complete | `git_commit` | Clear imperative message: `"Add X"`, `"Fix Y"`, `"Refactor Z"` | After commit confirmed, proceed to row 16. |
+| 16   | POST-COMMIT | After successful commit | `read_files` then `update_step` | `project_TODO.md` | Read `project_TODO.md`, then use `update_step` to replace all `[ ]` with `[x]`. Then proceed to row 17. |
+| 17   | CONFIRM | Steps marked complete | —  | — | *PREREQUISITE: Phase 16 must have been completed.* Write a clear summary (see SUMMARY FORMAT section below). CRITICAL: You MUST NOT call `complete_task` in the same turn as your summary. You must provide the summary and then end your response. The `complete_task` call can ONLY be made in a subsequent turn, and ONLY after the user has explicitly confirmed (e.g., 'yes', 'done', 'complete it'). |
+| 18   | MORE WORK | User says there is more to do or requests a change | — | — | Acknowledge the feedback. If the work is an extension, a missing piece, or a refinement of the current task, you MUST call `update_project_todo: add_step` to append the new steps to the current task.  NEVER start a new task until these added steps are completed. Run the full loop again from row 2. Return to row 17 and stop for confirmation |
+| 19   | COMPLETE | User explicitly confirms the task is fully done | `update_project_todo: complete_task` | `result`: one-line outcome summary (e.g., `"Voice engine built — 6/6 tests passed, committed."`) | This call returns TASK_COMPLETE which signals the graph to reset the context window. Confirm to the user: "Task marked as complete. Ready for the next task." |
+| 20   | INSTALL | A required package is not installed in the environment | `install_package` | Package name (and optional version) | Wait for user approval. If approved → package installs, call `update_project_todo: add_step` to log it, then continue from row 4 (research it). If rejected → mark the step `[!]` blocked and report to the user. NEVER install without this tool. |
+| 21   | ANY PHASE | A tool returns an unexpected error that cannot be resolved | — | — | Call `update_project_todo: update_step` to mark the current step `[!]` blocked. Report to the user: what tool failed, the exact error, and what is needed to continue. Do NOT guess or silently skip. |
+| 22   | PLANNING | User requests a multi-phase project or a large-scale improvement | `update_project_todo: start_task` | `task_name`: The overarching goal. `steps`: The initial known phases. | Start ONE parent task. As new phases or detailed requirements emerge, use `add_step` to expand the plan. NEVER start a new task for a sub-phase of an existing goal. |
+
 
 ---
 
-### [SUMMARY FORMAT — ROW 16 OUTPUT]
+### [SUMMARY FORMAT — ROW 17 OUTPUT]
 Your Final message to the user must include:
 - **What was implemented** — plain-english description of what changed and why
 - **Files created or changed** — list with paths
@@ -157,3 +157,4 @@ Your Final message to the user must include:
 {notes_section}
 
 """
+

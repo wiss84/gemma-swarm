@@ -40,8 +40,13 @@ logger = logging.getLogger(__name__)
 # ── Cancel-event registry ─────────────────────────────────────────────────────
 # Maps session_id → threading.Event so coding_agent_node can check for cancellation
 # without putting a non-serialisable object in LangGraph state.
-_cancel_events: dict[str, threading.Event] = {}
+_cancel_events: dict = {}
 _cancel_events_lock = threading.Lock()
+
+# Status-callback registry ──────────────────────────────────────────────────────
+# Maps session_id → callable so coding_agent_node can inject Slack status updates.
+_status_callbacks: dict = {}
+_status_callbacks_lock = threading.Lock()
 
 
 def register_cancel_event(session_id: str, event: threading.Event):
@@ -54,9 +59,24 @@ def unregister_cancel_event(session_id: str):
         _cancel_events.pop(session_id, None)
 
 
-def get_cancel_event(session_id: str) -> threading.Event | None:
+def get_cancel_event(session_id: str) -> "threading.Event | None":
     with _cancel_events_lock:
         return _cancel_events.get(session_id)
+
+
+def register_status_callback(session_id: str, callback: callable):
+    with _status_callbacks_lock:
+        _status_callbacks[session_id] = callback
+
+
+def unregister_status_callback(session_id: str):
+    with _status_callbacks_lock:
+        _status_callbacks.pop(session_id, None)
+
+
+def get_status_callback(session_id: str) -> "callable | None":
+    with _status_callbacks_lock:
+        return _status_callbacks.get(session_id)
 
 
 # ── Node: coding_agent ────────────────────────────────────────────────────────
@@ -70,6 +90,7 @@ def coding_agent_node(state: CodingAgentState) -> dict:
     workspace_path      = state.get("workspace_path", "")
     session_id          = state.get("session_id", "")
     cancel_event        = get_cancel_event(session_id) if session_id else None
+    status_callback     = get_status_callback(session_id) if session_id else None
     model_override      = state.get("model_override", "")
     agent_notes_enabled = state.get("agent_notes_enabled", True)
 
@@ -77,6 +98,7 @@ def coding_agent_node(state: CodingAgentState) -> dict:
         workspace_path=workspace_path,
         model_override=model_override,
         agent_notes_enabled=agent_notes_enabled,
+        status_callback=status_callback,
     )
 
     result_text, parsed = agent.run(

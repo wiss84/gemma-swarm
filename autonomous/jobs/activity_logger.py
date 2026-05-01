@@ -39,7 +39,7 @@ def log(job: str, description: str, status: str):
             sheet_id = sheet["id"]
             settings["activity_log_sheet_id"] = sheet_id
             save_settings(settings)
-            # logger.info(f"[activity_logger] Created activity log sheet: {sheet_id}")
+            logger.info(f"[activity_logger] Created activity log sheet: {sheet_id}")
 
         # Append new row
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -48,7 +48,7 @@ def log(job: str, description: str, status: str):
         # Find next empty row by appending — use a large row number offset
         # Google Sheets API append action handles this cleanly
         _append_row(sheet_id, row)
-        # logger.info(f"[activity_logger] Logged: [{job}] {description} {status}")
+        logger.info(f"[activity_logger] Logged: [{job}] {description} {status}")
 
     except Exception as e:
         logger.error(f"[activity_logger] Failed to log activity: {e}")

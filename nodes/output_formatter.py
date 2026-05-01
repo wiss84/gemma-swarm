@@ -32,7 +32,7 @@ from agents_utils.config import LABEL
 
 logger = logging.getLogger(__name__)
 
-SLACK_SAFE_CHARS = 3800
+SLACK_SAFE_CHARS = 2800
 
 # ── Sentinel ──────────────────────────────────────────────────────────────────
 # Inserted where the markdown table was.  Travels through _markdown_to_slack
@@ -288,12 +288,7 @@ def _process_mrkdwn(part: str) -> str:
         if heading_match:
             # Tokenize the heading text so inline formatting inside headings works
             inner = _tokenize_inline(heading_match.group(2))
-            # Avoid double-wrapping: if tokenizer already returned *text*,
-            # wrapping again would produce **text** which Slack doesn't render.
-            if inner.startswith("*") and inner.endswith("*") and not inner.startswith("**"):
-                processed.append(inner)
-            else:
-                processed.append(f"*{inner}*")
+            processed.append(f"*{inner}*")
             continue
 
         # Unordered list items: - item / * item → • item
@@ -402,82 +397,57 @@ def _normalize_links(text: str) -> str:
 
 def _split_message(text: str, max_chars: int = SLACK_SAFE_CHARS) -> list[str]:
     """
-    Split a long message into Slack-safe chunks without ever cutting mid-line,
-    mid-list-item, or mid-code-block.
-
-    Strategy:
-    1. First, atomise the text into segments that must never be broken:
-       code fences (```...```) and the SLACK_TABLE_SENTINEL are treated as
-       single indivisible units regardless of their length.
-    2. For text segments, split only on clean line boundaries.
-       Priority order for choosing a split point inside a text segment:
-         a. Blank line (\n\n)  — paragraph break, cleanest option.
-         b. Any newline (\n)   — at least a full line is kept intact.
-       A hard character cut is the absolute last resort and only happens when
-       a single line exceeds max_chars on its own.
-    3. Segments are accumulated into a chunk; when adding the next segment
-       would exceed max_chars, the current chunk is flushed first.
+    Split a long message into Slack-safe chunks.
+    Code fences and the SLACK_TABLE_SENTINEL travel through intact.
+    Tries to split at paragraph breaks first, then hard-splits.
+    
+    IMPORTANT: Code blocks (```...```) are NEVER split - they stay as atomic units.
+    Also handles orphan fences (``` at end without closing).
     """
     if len(text) <= max_chars:
         return [text]
 
-    # ── Step 1: split into atomic units ──────────────────────────────────────
-    # Each element is either:
-    #   • a code-fence block  (starts with ```)
-    #   • the table sentinel
-    #   • a plain-text segment
-    sentinel_re  = re.escape(SLACK_TABLE_SENTINEL)
-    atomic_re    = rf"(```[\s\S]*?```|```[\s\S]*?$|{sentinel_re})"
-    raw_segments = re.split(atomic_re, text, flags=re.MULTILINE)
+    chunks  = []
+    # Use re.split with capturing group - this includes delimiters in the result
+    # Pattern: (code fence with content) OR (sentinel)
+    # Also handle orphan fences: ``` at end of string without closing
+    code_block_pattern = r"(```[\s\S]*?```|```[\s\S]*?$|" + re.escape(SLACK_TABLE_SENTINEL) + r")"
+    parts   = re.split(code_block_pattern, text, flags=re.MULTILINE)
+    current = ""
 
-    # ── Step 2: for text segments, break into individual lines ───────────────
-    # We want the smallest safely-recombinable pieces.
-    pieces: list[tuple[str, bool]] = []   # (content, is_atomic)
-    for seg in raw_segments:
-        if seg.lstrip().startswith("```") or seg == SLACK_TABLE_SENTINEL:
-            pieces.append((seg, True))
+    for i, part in enumerate(parts):
+        # Check if this is a code block or sentinel (odd indices from re.split with capturing group)
+        is_code_or_sentinel = part.lstrip().startswith("```") or part == SLACK_TABLE_SENTINEL
+        
+        if is_code_or_sentinel:
+            # Code blocks and sentinel are ALWAYS kept intact - never split
+            if current:
+                chunks.append(current.strip())
+                current = ""
+            chunks.append(part)
+            continue
+        
+        # Regular text - can split if needed
+        if len(part) > max_chars:
+            if current:
+                chunks.append(current.strip())
+                current = ""
+            while len(part) > max_chars:
+                chunks.append(part[:max_chars])
+                part = part[max_chars:]
+            current = part
+            continue
+
+        if len(current) + len(part) > max_chars:
+            split_pos = current.rfind("\n\n")
+            if split_pos > max_chars // 2:
+                chunks.append(current[:split_pos].strip())
+                current = current[split_pos:].strip() + part
+            else:
+                chunks.append(current.strip())
+                current = part
         else:
-            # Split on newlines but keep the \n attached to the preceding line
-            # so reassembly with "".join() reconstructs the original text.
-            lines = re.split(r"(\n)", seg)
-            buf = ""
-            for token in lines:
-                buf += token
-                if token == "\n":
-                    pieces.append((buf, False))
-                    buf = ""
-            if buf:
-                pieces.append((buf, False))
-
-    # ── Step 3: accumulate pieces into max_chars chunks ───────────────────────
-    chunks:  list[str] = []
-    current: str       = ""
-
-    for content, is_atomic in pieces:
-        # Atomic blocks (code fences, sentinel): flush current, add as own chunk
-        # (even if they exceed max_chars — we never split code blocks).
-        if is_atomic:
-            if current.strip():
-                chunks.append(current.strip())
-                current = ""
-            chunks.append(content)
-            continue
-
-        # Would adding this piece exceed the limit?
-        if len(current) + len(content) > max_chars:
-            if current.strip():
-                chunks.append(current.strip())
-                current = ""
-
-        # Single line longer than max_chars: hard-split as last resort.
-        if not current and len(content) > max_chars:
-            while len(content) > max_chars:
-                chunks.append(content[:max_chars])
-                content = content[max_chars:]
-            current = content
-            continue
-
-        current += content
+            current += part
 
     if current.strip():
         chunks.append(current.strip())

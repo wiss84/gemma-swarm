@@ -109,9 +109,10 @@ def _filter_messages_for_agent(agent_name: str, messages: list, state: dict = No
 
 class BaseAgent(ABC):
 
-    def __init__(self, agent_name: str, model_name: str = None):
+    def __init__(self, agent_name: str, model_name: str = None, status_callback=None):
         self.agent_name = agent_name
         self.model_name = model_name or MODELS[agent_name]
+        self.status_callback = status_callback
 
         self.rate_limiter = RateLimitHandler(model_name=self.model_name)
 
@@ -282,6 +283,11 @@ class BaseAgent(ABC):
                         logger.info(f"[{self.agent_name}] Cancel detected mid-tool-loop, stopping.")
                         return "[cancelled]", None
 
+                    if self.status_callback:
+                        try:
+                            self.status_callback(tool_name)
+                        except Exception:
+                            pass
                     # logger.info(f"[{self.agent_name}] Tool call (native): {tool_name}")
                     tool_result = self._execute_tool(tool_name, tool_args)
                     # logger.info(f"[{self.agent_name}] Tool result: {tool_result[:100]}")
@@ -345,6 +351,11 @@ class BaseAgent(ABC):
             if parsed and self._is_tool_call(parsed):
                 tool_name = parsed.get("tool")
                 tool_args = parsed.get("args", {})
+                if self.status_callback:
+                    try:
+                        self.status_callback(tool_name)
+                    except Exception:
+                        pass
                 # logger.info(f"[{self.agent_name}] Tool call (text-JSON): {tool_name}")
                 tool_result = self._execute_tool(tool_name, tool_args)
                 # logger.info(f"[{self.agent_name}] Tool result: {tool_result[:100]}")

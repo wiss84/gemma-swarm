@@ -38,6 +38,11 @@ from pathlib import Path
 
 from agents_utils.config import PROJECT_ROOT, CODING_WORKSPACE_ROOT, HUMAN_CONFIRMATION_TIMEOUT
 from tools.env_tools import set_coding_slack_context
+from coding_agent.graph import (
+    run_coding_session,
+    register_status_callback,
+    unregister_status_callback,
+)
 from agents_utils.memory import list_workspaces
 from slack_utils.thread_state import (
     get_thread_state,
@@ -610,18 +615,12 @@ def run_coding_session_slack(
     Background thread entry point for a coding session.
     Invokes the CodingAgent graph, posts real-time tool status to Slack,
     and posts the final response when done.
-
-    Tool status hook (new_integrations.md §2):
-    The CodingAgent._execute_tool override calls slack_status_fn(tool_name)
-    before each tool. This function posts/updates a status message showing
-    which tool is running.
     """
     from coding_agent.graph import run_coding_session
     from coding_agent.agent import CodingAgent
     from agents_utils.context_ui_launcher import launch_context_ui
 
     # Set module-level Slack context for this session
-    # This allows install_package and other tools to post confirmations to Slack
     set_coding_slack_context(thread_ts=thread_ts, channel=channel, client=client)
 
     # Register rate-limit wait callback so the coding agent posts countdown
@@ -658,23 +657,8 @@ def run_coding_session_slack(
         except Exception as e:
             logger.debug(f"[coding] Tool status post failed: {e}")
 
-    # Inject the Slack status function into the agent at runtime.
-    # The patched _execute_tool sets slack_status_fn on the agent instance
-    # before calling tools, so status messages are posted to Slack.
-    original_execute = CodingAgent._execute_tool
-
-    def patched_execute(self_agent, tool_name, tool_args):
-        # Assign the status function to the agent before calling the tool
-        self_agent.slack_status_fn = slack_tool_status_fn
-        try:
-            self_agent.slack_status_fn(tool_name)
-        except Exception:
-            pass
-        return original_execute(self_agent, tool_name, tool_args)
-
-    # Monkey-patch on the class temporarily — safe because coding sessions
-    # are sequential (one per thread) and the patch is restored in finally
-    CodingAgent._execute_tool = patched_execute
+    # Register the status callback in the graph registry so the agent can use it
+    register_status_callback(session_id, slack_tool_status_fn)
 
     # Post initial status
     status_ts = post_status(client, channel, thread_ts, "💻 Coding agent is working...")
@@ -727,8 +711,8 @@ def run_coding_session_slack(
         logger.error(f"[coding] Session error: {e}", exc_info=True)
         result = [f"❌ Coding session error: {e}"]
     finally:
-        # Always restore the original method
-        CodingAgent._execute_tool = original_execute
+        # Unregister the status callback
+        unregister_status_callback(session_id)
 
         # Clear the rate-limit callback
         clear_coding_rate_callback()
@@ -740,50 +724,21 @@ def run_coding_session_slack(
         state.coding_status_ts = ""
         state.coding_active = False
 
-        # Remove the Stop button (replace with neutral text so thread stays clean)
+        # Always clean up the stop button, regardless of how the session ended
         if stop_btn_ts:
             try:
-                client.chat_update(
-                    channel=channel,
-                    ts=stop_btn_ts,
-                    text="✅ Response delivered.",
-                    blocks=[],
-                )
-            except Exception as e:
-                logger.warning(f"[coding] Could not remove stop button: {e}")
+                client.chat_delete(channel=channel, ts=stop_btn_ts)
+            except Exception:
+                pass
 
-        # Delete the transient "Stopping..." ack message if it was posted
-        stop_ack_ts = getattr(state, "stop_ack_ts", "")
-        stop_ack_channel = getattr(state, "stop_ack_channel", "") or channel
-        if stop_ack_ts:
-            try:
-                client.chat_delete(channel=stop_ack_channel, ts=stop_ack_ts)
-            except Exception as e:
-                logger.warning(f"[coding] Could not delete stop ack message: {e}")
-            state.stop_ack_ts = ""
-            state.stop_ack_channel = ""
-
-    # Post result
     if state.cancel_event.is_set():
-        # Update the stop button to show it was actioned
-        if stop_btn_ts:
-            try:
-                client.chat_update(
-                    channel=channel,
-                    ts=stop_btn_ts,
-                    text="⏹ Coding session stopped.",
-                    blocks=[],
-                )
-            except Exception:
-                pass
-        else:
-            try:
-                client.chat_postMessage(
-                    channel=channel, thread_ts=thread_ts,
-                    text="⏹ Coding session cancelled.",
-                )
-            except Exception:
-                pass
+        try:
+            client.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text="⏹ Coding session cancelled.",
+            )
+        except Exception:
+            pass
         return
 
     if result:

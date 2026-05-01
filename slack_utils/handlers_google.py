@@ -8,7 +8,8 @@ Mirrors the pattern of handlers_email.py and handlers_linkedin.py exactly.
 """
 
 import logging
-from nodes.human_gate import resolve_confirmation, build_google_feedback_modal
+from nodes.human_gate import resolve_confirmation
+from slack_utils.blocks import build_feedback_modal as build_google_feedback_modal
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ def register_google_handlers(app):
         thread_ts  = body["actions"][0]["value"]
         channel    = body["channel"]["id"]
         msg_ts     = body["message"]["ts"]
-        modal      = build_google_feedback_modal(thread_ts)
+        modal      = build_google_feedback_modal(thread_ts, title="Google Action Feedback", callback_id="google_feedback_modal")
         try:
             client.views_open(trigger_id=trigger_id, view=modal)
             client.chat_delete(channel=channel, ts=msg_ts)

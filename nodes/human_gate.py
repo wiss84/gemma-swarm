@@ -1,14 +1,9 @@
 """
-Gemma Swarm — Human Gate Node
+Gemma Swarm — Human Gate Nodes
 ================================
-Deterministic node. No LLM call.
+Deterministic nodes. No LLM call.
 Pauses the pipeline and posts Approve/Reject buttons to Slack.
 Blocks until human responds or timeout occurs.
-
-Used for:
-- Email approval (with reject → feedback modal → recompose)
-- File deletion requests
-- Agent escalations
 """
 
 import threading
@@ -16,52 +11,13 @@ import logging
 from langchain_core.messages import HumanMessage
 from agents_utils.state import AgentState
 from agents_utils.config import HUMAN_CONFIRMATION_TIMEOUT, LABEL, INTERRUPT_BUTTON_TIMEOUT
-
-# Import interrupt blocks from handlers_interrupt
-# build_interrupt_blocks is defined in handlers_interrupt.py but we build blocks inline here
-# so we just need to ensure the function exists
-def _get_interrupt_blocks(thread_ts: str, interrupt_message: str) -> list:
-    """Build interrupt decision blocks inline (same as in handlers_interrupt.py)."""
-    preview = interrupt_message[:80] + "..." if len(interrupt_message) > 80 else interrupt_message
-    return [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"⚡ *New message received while working on a task.*\nNew message: _{preview}_\n\nWhat should I do?",
-            },
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type":      "button",
-                    "text":      {"type": "plain_text", "text": "🔀 Combine", "emoji": True},
-                    "action_id": "interrupt_combine",
-                    "value":     f"{thread_ts}|{interrupt_message[:200]}",
-                },
-                {
-                    "type":      "button",
-                    "text":      {"type": "plain_text", "text": "🆕 Fresh Start", "emoji": True},
-                    "style":     "primary",
-                    "action_id": "interrupt_fresh",
-                    "value":     f"{thread_ts}|{interrupt_message[:200]}",
-                },
-                {
-                    "type":      "button",
-                    "text":      {"type": "plain_text", "text": "📋 Queue", "emoji": True},
-                    "action_id": "interrupt_queue",
-                    "value":     f"{thread_ts}|{interrupt_message[:200]}",
-                },
-            ],
-        },
-        {
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"_No response in {INTERRUPT_BUTTON_TIMEOUT // 60} minutes → will queue automatically_"}
-            ],
-        },
-    ]
+from slack_utils.blocks import (
+    build_interrupt_blocks,
+    build_confirmation_blocks,
+    build_email_preview_blocks,
+    build_linkedin_preview_blocks,
+    build_google_preview_blocks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,472 +63,227 @@ def clear_confirmation(thread_ts: str):
         _pending_confirmations.pop(thread_ts, None)
 
 
-def build_confirmation_blocks(pending_action: str, thread_ts: str) -> list:
-    """Standard Approve/Reject buttons for general confirmations."""
-    return [
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"⚠️ *Human confirmation required.*\n\n{pending_action}"},
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type":      "button",
-                    "text":      {"type": "plain_text", "text": "✅ Approve", "emoji": True},
-                    "style":     "primary",
-                    "action_id": "confirm_approve",
-                    "value":     thread_ts,
-                },
-                {
-                    "type":      "button",
-                    "text":      {"type": "plain_text", "text": "❌ Reject", "emoji": True},
-                    "style":     "danger",
-                    "action_id": "confirm_reject",
-                    "value":     thread_ts,
-                },
-            ],
-        },
-        {
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"_No response in {HUMAN_CONFIRMATION_TIMEOUT // 60} minutes → defaults to Reject_"}
-            ],
-        },
-    ]
+def _handle_confirmation_wait(thread_ts: str, timeout: int) -> str:
+    """Common logic to wait for human response or timeout."""
+    event = register_confirmation(thread_ts)
+    responded = event.wait(timeout=timeout)
+    decision  = get_decision(thread_ts) if responded else "rejected"
+    
+    if not responded:
+        logger.warning(f"[human_gate] Timeout after {timeout}s — defaulting to reject.")
+    
+    clear_confirmation(thread_ts)
+    return decision
 
 
-def build_email_preview_blocks(draft: dict, thread_ts: str) -> list:
+def interrupt_node(state: AgentState, client=None) -> dict:
     """
-    Email preview with Approve and Reject (opens feedback modal) buttons.
-    Reject opens a modal so the user can type feedback.
+    Handles interrupts (new messages arriving during a task).
+    Posts interrupt buttons and waits for decision.
     """
-    to_list  = ", ".join(draft.get("to", []))
-    subject  = draft.get("subject", "")
-    body     = draft.get("rendered_body", draft.get("message", ""))
-    language = draft.get("language", "english")
-    layout   = draft.get("layout", "official")
+    thread_ts      = state.get("slack_thread_ts", "")
+    channel        = state.get("slack_channel", "")
+    interrupt_message = state.get("interrupt_message", "")
 
-    # Truncate body preview for Slack block (3000 char limit per block)
-    body_preview = body[:2800] + "..." if len(body) > 2800 else body
+    if not thread_ts or not channel or client is None:
+        logger.warning("[interrupt_node] No Slack context — auto-continuing.")
+        return {
+            "human_decision":        "rejected",
+            "awaiting_human":        False,
+            "is_interrupted":         False,
+            "next_node":             "supervisor",
+        }
 
-    return [
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "📧 *Email Draft — Please Review*"},
-        },
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*To:*\n{to_list}"},
-                {"type": "mrkdwn", "text": f"*Subject:*\n{subject}"},
-                {"type": "mrkdwn", "text": f"*Language:*\n{language}"},
-                {"type": "mrkdwn", "text": f"*Layout:*\n{layout}"},
-            ],
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*Message:*\n```{body_preview}```"},
-        },
-        {"type": "divider"},
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type":      "button",
-                    "text":      {"type": "plain_text", "text": "✅ Send Email", "emoji": True},
-                    "style":     "primary",
-                    "action_id": "email_approve",
-                    "value":     thread_ts,
-                },
-                {
-                    "type":      "button",
-                    "text":      {"type": "plain_text", "text": "✏️ Reject & Give Feedback", "emoji": True},
-                    "style":     "danger",
-                    "action_id": "email_reject_feedback",
-                    "value":     thread_ts,
-                },
-            ],
-        },
-        {
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"_No response in {HUMAN_CONFIRMATION_TIMEOUT // 60} minutes → defaults to Reject_"}
-            ],
-        },
-    ]
+    try:
+        blocks = build_interrupt_blocks(thread_ts, interrupt_message)
+        client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="⚡ New message received while I'm working. What should I do?",
+            blocks=blocks,
+        )
+        logger.info(f"[interrupt_node] Posted interrupt buttons to {thread_ts}")
+    except Exception as e:
+        logger.error(f"[interrupt_node] Could not post interrupt buttons: {e}")
+        return {
+            "human_decision":        "rejected",
+            "awaiting_human":        False,
+            "is_interrupted":         False,
+            "next_node":             "supervisor",
+            "error_message":         "Could not post interrupt buttons to Slack.",
+        }
 
-
-def build_feedback_modal(thread_ts: str) -> dict:
-    """
-    Slack modal that opens when user clicks 'Reject & Give Feedback'.
-    The modal submit triggers resolve_confirmation with the feedback text.
-    """
+    decision = _handle_confirmation_wait(thread_ts, INTERRUPT_BUTTON_TIMEOUT)
+    
+    # Decision mapping for interrupts:
+    # - "rejected" = queue (continue from where it was paused)
+    # - "combine" or "fresh_start" = button handler is handling it, should NOT continue
+    if decision == "rejected":
+        next_node = "supervisor"
+    else:
+        next_node = "__interrupt_end__"
+    
+    logger.info(f"[interrupt_node] Decision: {decision[:60]} → {next_node}")
+    
     return {
-        "type":            "modal",
-        "callback_id":     "email_feedback_modal",
-        "private_metadata": thread_ts,
-        "title":           {"type": "plain_text", "text": "Email Feedback"},
-        "submit":          {"type": "plain_text", "text": "Submit"},
-        "close":           {"type": "plain_text", "text": "Cancel"},
-        "blocks": [
-            {
-                "type":    "input",
-                "block_id": "feedback_block",
-                "label":   {"type": "plain_text", "text": "What should be changed?"},
-                "element": {
-                    "type":        "plain_text_input",
-                    "action_id":   "feedback_input",
-                    "multiline":   True,
-                    "placeholder": {
-                        "type": "plain_text",
-                        "text": "e.g. Make it more formal, shorten the second paragraph, translate to French..."
-                    },
-                },
-            }
-        ],
+        "human_decision":        decision,
+        "awaiting_human":        False,
+        "is_interrupted":         False,
+        "next_node":             next_node,
     }
 
 
-def build_linkedin_preview_blocks(draft: dict, thread_ts: str) -> list:
-    """
-    LinkedIn post preview with Approve and Reject (feedback modal) buttons.
-    """
-    post_text      = draft.get("post_text", "")
-    media_filename = draft.get("media_filename", "")
-    language       = draft.get("language", "english")
+def email_confirm_node(state: AgentState, client=None) -> dict:
+    """Confirmation node for email drafts."""
+    thread_ts  = state.get("slack_thread_ts", "")
+    channel    = state.get("slack_channel", "")
+    email_draft = state.get("email_draft", {})
 
-    # Truncate preview for Slack (3000 char limit per block)
-    preview = post_text[:2800] + "..." if len(post_text) > 2800 else post_text
+    if not thread_ts or not channel or client is None:
+        logger.warning("[email_confirm_node] No Slack context — auto-approving.")
+        return {"human_decision": "approved", "awaiting_human": False, "next_node": "email_send"}
 
-    media_line = f"\n📎 *Attached:* `{media_filename}`" if media_filename else ""
-    lang_line  = f" · Language: {language}" if language != "english" else ""
+    try:
+        blocks = build_email_preview_blocks(email_draft, thread_ts)
+        client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="📧 Email draft ready for review.",
+            blocks=blocks,
+        )
+    except Exception as e:
+        logger.error(f"[email_confirm_node] Could not post to Slack: {e}")
+        return {"human_decision": "rejected", "awaiting_human": False, "next_node": "supervisor"}
 
-    blocks = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*📝 LinkedIn Post — Please Review*{lang_line}",
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"{preview}{media_line}",
-            },
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type":      "button",
-                    "text":      {"type": "plain_text", "text": "✅ Approve & Post", "emoji": True},
-                    "style":     "primary",
-                    "action_id": "linkedin_approve",
-                    "value":     thread_ts,
-                },
-                {
-                    "type":      "button",
-                    "text":      {"type": "plain_text", "text": "✏️ Reject & Give Feedback", "emoji": True},
-                    "style":     "danger",
-                    "action_id": "linkedin_reject_feedback",
-                    "value":     thread_ts,
-                },
-            ],
-        },
-    ]
-    return blocks
+    decision = _handle_confirmation_wait(thread_ts, HUMAN_CONFIRMATION_TIMEOUT)
+    next_node = "email_send" if decision == "approved" else "supervisor"
+    
+    return _finalize_confirmation_state(state, decision, next_node)
 
 
-def build_linkedin_feedback_modal(thread_ts: str) -> dict:
-    """Slack modal for LinkedIn post feedback."""
-    return {
-        "type":             "modal",
-        "callback_id":      "linkedin_feedback_modal",
-        "private_metadata": thread_ts,
-        "title":            {"type": "plain_text", "text": "Post Feedback"},
-        "submit":           {"type": "plain_text", "text": "Send Feedback"},
-        "close":            {"type": "plain_text", "text": "Cancel"},
-        "blocks": [
-            {
-                "type":     "input",
-                "block_id": "feedback_block",
-                "label":    {"type": "plain_text", "text": "What should be changed?"},
-                "element":  {
-                    "type":      "plain_text_input",
-                    "action_id": "feedback_input",
-                    "multiline": True,
-                    "placeholder": {
-                        "type": "plain_text",
-                        "text": "e.g. Make it shorter, add more hashtags, change the tone...",
-                    },
-                },
-            }
-        ],
-    }
+def linkedin_confirm_node(state: AgentState, client=None) -> dict:
+    """Confirmation node for LinkedIn posts."""
+    thread_ts      = state.get("slack_thread_ts", "")
+    channel        = state.get("slack_channel", "")
+    linkedin_draft = state.get("linkedin_draft", {})
+
+    if not thread_ts or not channel or client is None:
+        logger.warning("[linkedin_confirm_node] No Slack context — auto-approving.")
+        return {"human_decision": "approved", "awaiting_human": False, "next_node": "linkedin_send"}
+
+    try:
+        blocks = build_linkedin_preview_blocks(linkedin_draft, thread_ts)
+        client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="📝 LinkedIn post draft ready for review.",
+            blocks=blocks,
+        )
+    except Exception as e:
+        logger.error(f"[linkedin_confirm_node] Could not post to Slack: {e}")
+        return {"human_decision": "rejected", "awaiting_human": False, "next_node": "supervisor"}
+
+    decision = _handle_confirmation_wait(thread_ts, HUMAN_CONFIRMATION_TIMEOUT)
+    next_node = "linkedin_send" if decision == "approved" else "supervisor"
+    
+    return _finalize_confirmation_state(state, decision, next_node)
 
 
-def build_google_preview_blocks(result_text: str, thread_ts: str) -> list:
-    """
-    Google write action preview with Confirm and Reject (opens feedback modal) buttons.
-    Shows the result of the action (e.g. doc link, event details) for the user to review.
-    """
-    preview = result_text[:10000] + "..." if len(result_text) > 10000 else result_text
- 
-    return [
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "🔵 *Google Action — Please Review*"},
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": preview},
-        },
-        {"type": "divider"},
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type":      "button",
-                    "text":      {"type": "plain_text", "text": "✅ Confirm", "emoji": True},
-                    "style":     "primary",
-                    "action_id": "google_approve",
-                    "value":     thread_ts,
-                },
-                {
-                    "type":      "button",
-                    "text":      {"type": "plain_text", "text": "✏️ Reject & Give Feedback", "emoji": True},
-                    "style":     "danger",
-                    "action_id": "google_reject_feedback",
-                    "value":     thread_ts,
-                },
-            ],
-        },
-        {
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"_No response in {HUMAN_CONFIRMATION_TIMEOUT // 60} minutes → defaults to Reject_"}
-            ],
-        },
-    ]
-
-def build_google_feedback_modal(thread_ts: str) -> dict:
-    """Feedback modal for Google write action rejection."""
-    return {
-        "type":             "modal",
-        "callback_id":      "google_feedback_modal",
-        "private_metadata": thread_ts,
-        "title":            {"type": "plain_text", "text": "Reject Google Action"},
-        "submit":           {"type": "plain_text", "text": "Submit Feedback"},
-        "close":            {"type": "plain_text", "text": "Cancel"},
-        "blocks": [
-            {
-                "type":    "input",
-                "block_id": "feedback_block",
-                "label":   {"type": "plain_text", "text": "What should be changed?"},
-                "element": {
-                    "type":        "plain_text_input",
-                    "action_id":   "feedback_input",
-                    "multiline":   True,
-                    "placeholder": {"type": "plain_text", "text": "e.g. Change the event time to 3pm, update the title..."},
-                },
-            }
-        ],
-    }
-
-def human_gate_node(state: AgentState, client=None) -> dict:
-    """
-    LangGraph node for human-in-the-loop confirmation.
-    Detects whether this is an email approval, general confirmation, or interrupt
-    and posts the appropriate Slack blocks.
-    """
+def google_confirm_node(state: AgentState, client=None) -> dict:
+    """Confirmation node for Google write actions."""
     thread_ts      = state.get("slack_thread_ts", "")
     channel        = state.get("slack_channel", "")
     pending_action = state.get("pending_confirmation", "Action requires your approval.")
     messages       = state.get("messages", [])
-    email_draft    = state.get("email_draft", {})
     active_agent   = state.get("active_agent", "")
-    is_interrupted = state.get("is_interrupted", False)
-    interrupt_message = state.get("interrupt_message", "")
 
-    # No Slack context — auto-approve for local testing
     if not thread_ts or not channel or client is None:
-        logger.warning("[human_gate] No Slack context — auto-approving.")
-        # For interrupts, still need to handle state
-        if is_interrupted:
-            return {
-                "human_decision":        "rejected",  # Default for interrupt = continue
-                "awaiting_human":        False,
-                "requires_confirmation": False,
-                "google_requires_confirmation": False,
-                "is_interrupted":         False,  # Clear interrupt flag
-                "next_node":             "supervisor",
-                "active_agent":          active_agent,
-                "linkedin_draft":        state.get("linkedin_draft", {}),
-                "email_draft":           state.get("email_draft", {}),
-            }
-        return {
-            "human_decision":        "approved",
-            "awaiting_human":        False,
-            "requires_confirmation": False,
-            "google_requires_confirmation": False,
-            "next_node":             _resolve_next_node(state, "approved"),
-            "active_agent":          active_agent,
-            "linkedin_draft":        state.get("linkedin_draft", {}),
-            "email_draft":           state.get("email_draft", {}),
-        }
+        logger.warning("[google_confirm_node] No Slack context — auto-approving.")
+        return {"human_decision": "approved", "awaiting_human": False, "next_node": "supervisor"}
 
-    event = register_confirmation(thread_ts)
+    try:
+        # Extract the result text from messages
+        google_result = ""
+        agent_label = f"{LABEL.get(active_agent, active_agent)}:"
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                if agent_label and content.startswith(agent_label):
+                    google_result = content[len(agent_label):].strip()
+                    break
+        
+        blocks = build_google_preview_blocks(google_result or pending_action, thread_ts)
+        client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="🔵 Google action ready for review.",
+            blocks=blocks,
+        )
+    except Exception as e:
+        logger.error(f"[google_confirm_node] Could not post to Slack: {e}")
+        return {"human_decision": "rejected", "awaiting_human": False, "next_node": "supervisor"}
 
-    linkedin_draft = state.get("linkedin_draft", {})
-
-    # Check if this is an interrupt situation
-    if is_interrupted:
-        # This is an interrupt - show interrupt buttons
-        try:
-            blocks = _get_interrupt_blocks(thread_ts, interrupt_message)
-            client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                text="⚡ New message received while I'm working. What should I do?",
-                blocks=blocks,
-            )
-            logger.info(f"[human_gate] Posted interrupt buttons to {thread_ts}")
-        except Exception as e:
-            logger.error(f"[human_gate] Could not post interrupt buttons: {e}")
-            clear_confirmation(thread_ts)
-            return {
-                "human_decision":        "rejected",
-                "awaiting_human":        False,
-                "requires_confirmation": False,
-                "google_requires_confirmation": False,
-                "is_interrupted":         False,
-                "next_node":             "supervisor",
-                "error_message":         "Could not post interrupt buttons to Slack.",
-            }
-    else:
-        # Normal human confirmation (email/linkedin approval)
-        is_linkedin = active_agent == "linkedin_composer" and bool(linkedin_draft)
-        is_email    = active_agent == "email_composer" and bool(email_draft)
-        _google_agents = {"calendar_agent", "docs_agent", "sheets_agent"}
-        _google_labels = {
-            "calendar_agent": LABEL["calendar_agent"],
-            "docs_agent":     LABEL["docs_agent"],
-            "sheets_agent":   LABEL["sheets_agent"],
-        }
-        is_google   = active_agent in _google_agents and state.get("google_requires_confirmation", False)
-
-        try:
-            if is_google:
-                # Show the last result from whichever Google agent ran
-                google_result  = ""
-                agent_label    = _google_labels.get(active_agent, "")
-                for msg in reversed(messages):
-                    if isinstance(msg, HumanMessage):
-                        content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                        if agent_label and content.startswith(agent_label):
-                            google_result = content[len(agent_label):].strip()
-                            break
-                blocks = build_google_preview_blocks(google_result or pending_action, thread_ts)
-                client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text="🔵 Google action ready for review.",
-                    blocks=blocks,
-                )
-            elif is_linkedin:
-                blocks = build_linkedin_preview_blocks(linkedin_draft, thread_ts)
-                client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text="📝 LinkedIn post draft ready for review.",
-                    blocks=blocks,
-                )
-            elif is_email:
-                blocks = build_email_preview_blocks(email_draft, thread_ts)
-                client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text="📧 Email draft ready for review.",
-                    blocks=blocks,
-                )
-            else:
-                blocks = build_confirmation_blocks(pending_action, thread_ts)
-                client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text="⚠️ Human confirmation required.",
-                    blocks=blocks,
-                )
-            logger.info(f"[human_gate] Posted {'linkedin preview' if is_linkedin else 'email preview' if is_email else 'confirmation'} to {thread_ts}")
-        except Exception as e:
-            logger.error(f"[human_gate] Could not post to Slack: {e}")
-            clear_confirmation(thread_ts)
-            return {
-                "human_decision":        "rejected",
-                "awaiting_human":        False,
-                "requires_confirmation": False,
-                "google_requires_confirmation": False,
-                "next_node":             "supervisor",
-                "error_message":         "Could not post confirmation to Slack.",
-            }
-
-    # Block until human responds or timeout
-    # Use interrupt timeout if interrupted, otherwise use human confirmation timeout
-    timeout = INTERRUPT_BUTTON_TIMEOUT if is_interrupted else HUMAN_CONFIRMATION_TIMEOUT
-    responded = event.wait(timeout=timeout)
-    decision  = get_decision(thread_ts) if responded else "rejected"
-
-    if not responded:
-        logger.warning("[human_gate] Timeout — defaulting to reject.")
-        # For interrupt timeout, default to "queue" behavior (continue)
-        if is_interrupted:
-            decision = "rejected"  # rejected = continue to supervisor = queue behavior
-
-    clear_confirmation(thread_ts)
+    decision = _handle_confirmation_wait(thread_ts, HUMAN_CONFIRMATION_TIMEOUT)
+    next_node = "supervisor" if decision == "approved" else "supervisor" # Google always goes back to supervisor
     
-    # Handle routing based on interrupt status
-    if is_interrupted:
-        # Clear the interrupt flag
-        is_interrupted = False
-        
-        # Decision mapping for interrupts:
-        # - "rejected" = queue (continue from where it was paused)
-        # - "combine" or "fresh_start" = button handler is handling it, should NOT continue
-        if decision == "rejected":
-            # Queue - continue to supervisor (old task continues)
-            next_node = "supervisor"
-        else:
-            # Combine or fresh start - button handler is cancelling this task
-            # Don't continue to supervisor - just end here
-            # The button handler will start a new thread
-            next_node = "__interrupt_end__"  # Special marker to not continue
-        
-        logger.info(f"[human_gate] Interrupt decision: {decision[:60]} → {next_node}")
-    else:
-        next_node = _resolve_next_node(state, decision)
-        logger.info(f"[human_gate] Decision: {decision[:60]} → {next_node}")
+    return _finalize_confirmation_state(state, decision, next_node)
 
-    # Extract feedback from decision string "rejected: <feedback>"
+
+def general_confirm_node(state: AgentState, client=None) -> dict:
+    """Confirmation node for general actions."""
+    thread_ts      = state.get("slack_thread_ts", "")
+    channel        = state.get("slack_channel", "")
+    pending_action = state.get("pending_confirmation", "Action requires your approval.")
+
+    if not thread_ts or not channel or client is None:
+        logger.warning("[general_confirm_node] No Slack context — auto-approving.")
+        return {"human_decision": "approved", "awaiting_human": False, "next_node": "output_formatter"}
+
+    try:
+        blocks = build_confirmation_blocks(pending_action, thread_ts)
+        client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="⚠️ Human confirmation required.",
+            blocks=blocks,
+        )
+    except Exception as e:
+        logger.error(f"[general_confirm_node] Could not post to Slack: {e}")
+        return {"human_decision": "rejected", "awaiting_human": False, "next_node": "supervisor"}
+
+    decision = _handle_confirmation_wait(thread_ts, HUMAN_CONFIRMATION_TIMEOUT)
+    
+    # Route based on active agent
+    active_agent = state.get("active_agent", "")
+    if decision == "approved":
+        if not active_agent:
+            return {"human_decision": "approved", "awaiting_human": False, "next_node": "output_formatter"}
+        return {"human_decision": "approved", "awaiting_human": False, "next_node": "supervisor"}
+    
+    return _finalize_confirmation_state(state, decision, "supervisor")
+
+
+def _finalize_confirmation_state(state: AgentState, decision: str, next_node: str) -> dict:
+    """Common logic to update state after a confirmation decision."""
+    messages = state.get("messages", [])
+    pending_action = state.get("pending_confirmation", "Action requires your approval.")
+    
+    # Extract feedback
     feedback = ""
     if decision.startswith("rejected:"):
         feedback = decision[len("rejected:"):].strip()
 
-    # Inject feedback into draft so composer can use it on rewrite
+    # Inject feedback into drafts
     linkedin_draft = state.get("linkedin_draft", {})
     email_draft    = state.get("email_draft", {})
     if feedback:
-        if state.get("active_agent") == "linkedin_composer" and linkedin_draft:
+        active_agent = state.get("active_agent", "")
+        if active_agent == "linkedin_composer" and linkedin_draft:
             linkedin_draft = {**linkedin_draft, "feedback": feedback}
-        elif state.get("active_agent") == "email_composer" and email_draft:
+        elif active_agent == "email_composer" and email_draft:
             email_draft = {**email_draft, "feedback": feedback}
 
-    # Build return state
-    return_state = {
+    return {
         "human_decision":        decision,
         "awaiting_human":        False,
         "requires_confirmation": False,
@@ -588,33 +299,24 @@ def human_gate_node(state: AgentState, client=None) -> dict:
             )
         ],
     }
-    
-    # Clear interrupt flag if it was set
-    if state.get("is_interrupted", False):
-        return_state["is_interrupted"] = False
-    
-    return return_state
 
 
-def _resolve_next_node(state: AgentState, decision: str) -> str:
-    """Route after human decision."""
+def human_gate_node(state: AgentState, client=None) -> dict:
+    """
+    DEPRECATED: Use specialized confirm nodes and interrupt_node.
+    Kept for backward compatibility during transition.
+    """
+    # This is now just a router to the new nodes
+    is_interrupted = state.get("is_interrupted", False)
+    if is_interrupted:
+        return interrupt_node(state, client)
+    
     active_agent = state.get("active_agent", "")
-
-    if decision == "approved":
-        if active_agent == "email_composer":
-            return "email_send"
-        if active_agent == "linkedin_composer":
-            return "linkedin_send"
-        # Google agents - route to supervisor (no separate send node)
-        if active_agent in {"calendar_agent", "docs_agent", "sheets_agent"}:
-            return "supervisor"
-        return "output_formatter"
-
-    # Rejected — if no active_agent (validator escalation), go to output_formatter to end the pipeline
-    if not active_agent:
-        return "output_formatter"
+    if active_agent == "email_composer":
+        return email_confirm_node(state, client)
+    if active_agent == "linkedin_composer":
+        return linkedin_confirm_node(state, client)
+    if active_agent in {"calendar_agent", "docs_agent", "sheets_agent"}:
+        return google_confirm_node(state, client)
     
-    # Otherwise, go back to supervisor with feedback
-    return "supervisor"
-
-
+    return general_confirm_node(state, client)

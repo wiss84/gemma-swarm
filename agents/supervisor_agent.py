@@ -21,7 +21,7 @@ Model: gemma-3-27b-it (128k context)
 import logging
 from agents.base_agent import BaseAgent
 from agents_utils.state import AgentState
-from agents_utils.config import LABEL
+from agents_utils.config import LABEL, AGENT_GUARDS
 from agents_utils.context_tracker import snapshot_context_usage
 from agents_utils.context_ui_launcher import launch_context_ui
 from slack_utils.handlers_workspace import get_user_preferences_prompt
@@ -64,30 +64,12 @@ class SupervisorAgent(BaseAgent):
             }
 
         # Safety guards
-        if parsed.get("next_node") == "human_gate" and not parsed.get("requires_confirmation"):
-            logger.warning("[supervisor] human_gate without requires_confirmation — overriding.")
-            parsed["next_node"]     = "output_formatter"
-            parsed["task_complete"] = True
-
-        if parsed.get("next_node") == "researcher" and not parsed.get("requires_research"):
-            logger.warning("[supervisor] researcher without requires_research — overriding.")
-            parsed["next_node"]     = "output_formatter"
-            parsed["task_complete"] = True
-
-        if parsed.get("next_node") == "deep_researcher" and not parsed.get("requires_deep_research"):
-            logger.warning("[supervisor] deep_researcher without requires_deep_research — overriding.")
-            parsed["next_node"]     = "output_formatter"
-            parsed["task_complete"] = True
-
-        if parsed.get("next_node") == "email_composer" and not parsed.get("requires_email"):
-            logger.warning("[supervisor] email_composer without requires_email — overriding.")
-            parsed["next_node"]     = "output_formatter"
-            parsed["task_complete"] = True
-
-        if parsed.get("next_node") == "linkedin_composer" and not parsed.get("requires_linkedin"):
-            logger.warning("[supervisor] linkedin_composer without requires_linkedin — overriding.")
-            parsed["next_node"]     = "output_formatter"
-            parsed["task_complete"] = True
+        for node, flag in AGENT_GUARDS.items():
+            if parsed.get("next_node") == node and not parsed.get(flag):
+                logger.warning(f"[supervisor] {node} without {flag} — overriding.")
+                parsed["next_node"]     = "output_formatter"
+                parsed["task_complete"] = True
+                break
 
         return parsed.get("response", response_text), parsed
 
@@ -103,21 +85,21 @@ def get_supervisor_agent() -> SupervisorAgent:
     return _supervisor_agent
 
 
-def _mark_subtask_done(task_plan: list, current_subtask: str) -> list:
-    """Mark the most recently completed subtask as done."""
-    # Find first pending subtask whose description matches current_subtask
+def _mark_subtask_done(task_plan: list, current_subtask_id: int | None) -> list:
+    """Mark the subtask with the given ID as done."""
+    if current_subtask_id is None:
+        return task_plan
+
     updated = []
     marked  = False
     for s in task_plan:
-        if not marked and s["status"] == "pending" and (
-            current_subtask.lower() in s["description"].lower() or
-            s["description"].lower() in current_subtask.lower()
-        ):
+        if not marked and s.get("id") == current_subtask_id and s["status"] == "pending":
             updated.append({**s, "status": "done"})
             marked = True
         else:
             updated.append(s)
-    # If no match found, mark the first pending one as done
+    
+    # If no match found by ID, mark the first pending one as done (fallback)
     if not marked:
         for i, s in enumerate(updated):
             if s["status"] == "pending":
@@ -140,8 +122,9 @@ def supervisor_agent_node(state: AgentState) -> dict:
     
     # Mark previous subtask as done if we're returning from an agent
     active_agent = state.get("active_agent", "")
+    current_subtask_id = state.get("current_subtask_id")
     if active_agent in ("researcher", "deep_researcher", "email_composer", "email_send", "linkedin_composer", "linkedin_send") and task_plan:
-        task_plan = _mark_subtask_done(task_plan, current_subtask)
+        task_plan = _mark_subtask_done(task_plan, current_subtask_id)
 
     logger.info(f"[supervisor] Thinking... (complex={is_complex_task}, plan_items={len(task_plan)})")
 
@@ -150,6 +133,7 @@ def supervisor_agent_node(state: AgentState) -> dict:
     )
 
     new_subtask            = parsed.get("current_subtask", "")
+    new_subtask_id            = parsed.get("current_subtask_id")
     requires_research      = parsed.get("requires_research", False)
     requires_deep_research = parsed.get("requires_deep_research", False)
     requires_email          = parsed.get("requires_email", False)
@@ -210,6 +194,7 @@ def supervisor_agent_node(state: AgentState) -> dict:
         "messages": new_messages,
         "original_task":           original_task,
         "current_subtask":         new_subtask,
+        "current_subtask_id":      new_subtask_id,
         "task_plan":               task_plan,
         "requires_research":       requires_research,
         "requires_deep_research":  requires_deep_research,

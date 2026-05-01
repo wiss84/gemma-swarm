@@ -3,11 +3,10 @@ Gemma Swarm — Coding Agent: Project TODO Tool
 ==============================================
 A single tool with four operations for managing the project task log.
 
-The tool OWNS project_TODO.md — it is the only writer. The file is
-append-only: new content is always added at the bottom, existing content
-is never modified or overwritten. This means the full task history
-accumulates across all sessions and the agent can read it to understand
-what was done in previous sessions.
+The tool OWNS project_TODO.md — it is the only writer. The ### Plan block
+written by start_task is edited in-place as steps progress — checkboxes are
+updated directly in the file. The full task history accumulates across all
+sessions and the agent can read it to understand what was done previously.
 
 Operations:
     start_task(task_name, steps)
@@ -17,17 +16,25 @@ Operations:
         Saves task_name and steps in module memory for use by other operations.
 
     update_step(step_index, status, note="")
-        Called after completing, starting, or blocking a step.
-        Rewrites the status marker of that step in the live task block:
+        Called after completing, starting, or blocking one or more steps.
+        Edits the checkbox(es) directly in the existing ### Plan block in the
+        file — no new block is appended. Supports bulk updates:
+            step_index: single int  -> update one step
+            step_index: list[int]   -> update multiple steps in one call
+        Markers:
             [x] = done
             [~] = in progress
             [!] = blocked
         step_index is 0-based (first step = 0).
-        Optional note is appended to the step line for context.
+        Optional note is appended to the step line (single step only).
 
     add_step(step_description)
-        Called when the agent discovers a new unplanned step mid-task.
-        Appends a new [ ] step to the live task block and to module memory.
+        Called when the agent discovers one or more unplanned steps mid-task.
+        Appends new [ ] line(s) to the existing ### Plan block.
+        step_description accepts a single string or a list of strings:
+            add_step(step_description='Fix edge case')           -- adds 1 step
+            add_step(step_description=['Fix edge case',          -- adds 2 steps
+                                       'Update changelog'])
 
     complete_task(result)
         Called after git_commit, when the main task is fully done.
@@ -36,7 +43,7 @@ Operations:
         Returns a result string containing TASK_COMPLETE so the graph
         can detect task completion and reset the context window.
 
-File format (append-only):
+File format:
 
     # <project_name> - Task Log
 
@@ -51,14 +58,7 @@ File format (append-only):
     - [ ] Validate and fix any errors
     - [ ] Commit
 
-    (steps update live as agent progresses)
-
-    - [x] Read project structure and requirements
-    - [x] Research calculator libraries if needed
-    - [x] Write calculator.py with 4 operations
-    - [x] Write tests/test_calculator.py
-    - [x] Validate and fix any errors — fixed 1 import error
-    - [x] Commit
+    (checkboxes are edited in-place as the agent progresses — no duplication)
 
     ---
     ## 2025-04-25 14:45 | Task: Create calculator module
@@ -68,9 +68,10 @@ File format (append-only):
 """
 
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import List, Literal, Union
 
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
@@ -122,32 +123,50 @@ def _append(todo_path: Path, content: str) -> None:
         f.write("\n" + content)
 
 
-def _build_steps_block() -> str:
-    """Renders the current in-memory steps as a markdown checklist."""
-    lines = []
-    for i, desc in enumerate(_current_steps):
-        marker = _current_step_statuses[i] if i < len(_current_step_statuses) else " "
-        note = _current_step_notes[i] if i < len(_current_step_notes) else ""
-        line = f"- [{marker}] {desc}"
+def _build_initial_steps_block() -> str:
+    """Renders all steps as [ ] checkboxes for start_task."""
+    return "\n".join(f"- [ ] {desc}" for desc in _current_steps)
+
+
+def _edit_steps_in_file(todo_path: Path, indices: List[int]) -> None:
+    """
+    Edits step checkboxes in-place in the ### Plan block.
+    For each index, finds the step line and replaces its marker.
+    A note is written only for single-step updates.
+    """
+    content = todo_path.read_text(encoding="utf-8")
+    for i in indices:
+        desc = _current_steps[i]
+        marker = _current_step_statuses[i]
+        note = _current_step_notes[i]
+        new_line = f"- [{marker}] {desc}"
         if note:
-            line += f" — {note}"
-        lines.append(line)
-    return "\n".join(lines)
+            new_line += f" \u2014 {note}"
+        # Replace any existing marker variant for this step description,
+        # optionally followed by a note (" — ...") up to end of line.
+        pattern = re.compile(
+            r"- \[[x~! ]\] " + re.escape(desc) + r"(?: \u2014 [^\n]*)?",
+            re.MULTILINE
+        )
+        content = pattern.sub(new_line, content, count=1)
+    todo_path.write_text(content, encoding="utf-8")
 
 
-def _rewrite_steps_in_file(todo_path: Path) -> None:
+def _append_step_to_plan(todo_path: Path, step_desc: str) -> None:
     """
-    Appends the current step snapshot to the file.
-    Since the file is append-only, each update_step/add_step call
-    appends a fresh snapshot of the current step list so progress
-    is always visible at the bottom of the file.
+    Appends a new [ ] step line to the active ### Plan block.
+    Inserts the line after the last step line currently in the file.
     """
-    ts = _timestamp()
-    block = (
-        f"_[{ts}] Step update:_\n"
-        f"{_build_steps_block()}\n"
-    )
-    _append(todo_path, block)
+    content = todo_path.read_text(encoding="utf-8")
+    new_line = f"- [ ] {step_desc}"
+    matches = list(re.finditer(r"^- \[[x~! ]\] .+$", content, re.MULTILINE))
+    if matches:
+        last_match = matches[-1]
+        insert_pos = last_match.end()
+        content = content[:insert_pos] + "\n" + new_line + content[insert_pos:]
+    else:
+        content = content.rstrip() + "\n" + new_line + "\n"
+    todo_path.write_text(content, encoding="utf-8")
 
 
 # -- Tool schema ---------------------------------------------------------------
@@ -157,7 +176,7 @@ class UpdateProjectTodoInput(BaseModel):
         description=(
             "Which operation to perform:\n"
             "  start_task    -- FIRST call when beginning a task. Pass task_name + full steps plan.\n"
-            "  update_step   -- After finishing, starting, or blocking a step. Pass step_index + status.\n"
+            "  update_step   -- After finishing, starting, or blocking step(s). Pass step_index + status.\n"
             "  add_step      -- When a new unplanned step is discovered mid-task. Pass step_description.\n"
             "  complete_task -- After git_commit when the task is fully done. Pass result only."
         )
@@ -180,11 +199,14 @@ class UpdateProjectTodoInput(BaseModel):
             "Ignored for all other operations."
         )
     )
-    step_index: int = Field(
+    step_index: Union[int, List[int]] = Field(
         default=-1,
         description=(
-            "REQUIRED for update_step. 0-based index of the step to update. "
-            "First step = 0. Ignored for all other operations."
+            "REQUIRED for update_step. 0-based index of the step(s) to update. "
+            "Pass a single int to update one step, or a list of ints to bulk-update "
+            "multiple steps in one call (all receive the same status). "
+            "First step = 0. Ignored for all other operations. "
+            "Bulk example: step_index=[0,1,2], status='x' marks 3 steps done in one request."
         )
     )
     status: str = Field(
@@ -197,17 +219,19 @@ class UpdateProjectTodoInput(BaseModel):
     note: str = Field(
         default="",
         description=(
-            "Optional for update_step. Short context note appended to the step line. "
+            "Optional for update_step (single step only). "
+            "Short context note appended to the step line. "
             "Example: 'fixed deprecated Communicate() call'. "
-            "Ignored for all other operations."
+            "Ignored for bulk updates and all other operations."
         )
     )
-    step_description: str = Field(
+    step_description: Union[str, List[str]] = Field(
         default="",
         description=(
-            "REQUIRED for add_step. Description of the new unplanned step to add. "
-            "It will be added as [ ] (not started). "
-            "Example: 'Fix missing __init__.py in package'. "
+            "REQUIRED for add_step. One new step as a string, or a list of strings to add multiple steps at once. "
+            "Each step will be added as [ ] (not started). "
+            "Example (single): 'Fix missing __init__.py'. "
+            "Example (bulk): ['Fix missing __init__.py', 'Update requirements.txt']. "
             "Ignored for all other operations."
         )
     )
@@ -228,10 +252,10 @@ def update_project_todo(
     operation: str,
     task_name: str = "",
     steps: list[str] = None,
-    step_index: int = -1,
+    step_index: Union[int, List[int]] = -1,
     status: str = "",
     note: str = "",
-    step_description: str = "",
+    step_description: Union[str, List[str]] = "",
     result: str = "",
 ) -> str:
     """
@@ -241,10 +265,13 @@ def update_project_todo(
     - start_task:    First tool call when you begin executing a task.
                      Pass the full planned step list upfront as [ ] checkboxes.
                      Do NOT call for pure conversations or brainstorming.
-    - update_step:   After you finish, start, or get blocked on any step.
-                     Pass the step_index (0-based) and status: 'x', '~', or '!'.
-    - add_step:      When you discover a new unplanned step mid-task.
-                     Pass the step description — it will be added as [ ].
+    - update_step:   After you finish, start, or get blocked on step(s).
+                     Pass step_index (int or list[int]) and status: 'x', '~', or '!'.
+                     Bulk example: step_index=[0,1,2], status='x' marks 3 steps done.
+                     Checkboxes are edited in-place — no duplicate blocks written.
+    - add_step:      When you discover one or more unplanned steps mid-task.
+                     Pass a single string or a list of strings.
+                     All new steps are appended as [ ] to the existing plan block.
     - complete_task: After git_commit, when the task is fully done.
                      Pass only the result summary. Steps are already tracked.
                      Returns a string containing TASK_COMPLETE on success.
@@ -282,7 +309,7 @@ def update_project_todo(
             _current_step_notes = [""] * len(_current_steps)
             _task_start_ts = ts
 
-            steps_block = _build_steps_block()
+            steps_block = _build_initial_steps_block()
             block = (
                 "---\n"
                 f"## {ts} | Task: {_current_task_name}\n"
@@ -307,30 +334,51 @@ def update_project_todo(
                     "[update_project_todo error: no active task. "
                     "Call start_task before update_step.]"
                 )
-            if step_index < 0 or step_index >= len(_current_steps):
-                return (
-                    f"[update_project_todo error: step_index {step_index} is out of range. "
-                    f"Valid range: 0 to {len(_current_steps) - 1}.]"
-                )
             if status not in ("x", "~", "!"):
                 return (
                     "[update_project_todo error: status must be 'x' (done), '~' (in progress), "
                     "or '!' (blocked).]"
                 )
 
-            _current_step_statuses[step_index] = status
-            if note:
-                _current_step_notes[step_index] = note.strip()
+            # Normalise step_index to a list
+            if isinstance(step_index, int):
+                indices = [step_index]
+            else:
+                indices = list(step_index)
 
-            _rewrite_steps_in_file(todo_path)
+            # Validate all indices first
+            invalid = [i for i in indices if i < 0 or i >= len(_current_steps)]
+            if invalid:
+                return (
+                    f"[update_project_todo error: step_index {invalid} out of range. "
+                    f"Valid range: 0 to {len(_current_steps) - 1}.]"
+                )
+
+            # Apply updates to in-memory state
+            is_bulk = len(indices) > 1
+            for i in indices:
+                _current_step_statuses[i] = status
+                if note and not is_bulk:
+                    _current_step_notes[i] = note.strip()
+
+            # Edit checkboxes in-place in the file
+            _edit_steps_in_file(todo_path, indices)
 
             status_label = {"x": "Done", "~": "In Progress", "!": "Blocked"}.get(status, status)
-            logger.info(f"[todo_tools] update_step: step {step_index} → [{status}] {status_label}")
-            return (
-                f"update_project_todo: Step {step_index} updated to [{status}] {status_label}\n"
-                f"Step: {_current_steps[step_index]}\n"
-                f"Note: {note or '(none)'}"
-            )
+            if is_bulk:
+                logger.info(f"[todo_tools] update_step (bulk): steps {indices} -> [{status}] {status_label}")
+                return (
+                    f"update_project_todo: {len(indices)} steps updated to [{status}] {status_label}\n"
+                    f"Indices: {indices}"
+                )
+            else:
+                i = indices[0]
+                logger.info(f"[todo_tools] update_step: step {i} -> [{status}] {status_label}")
+                return (
+                    f"update_project_todo: Step {i} updated to [{status}] {status_label}\n"
+                    f"Step: {_current_steps[i]}\n"
+                    f"Note: {note or '(none)'}"
+                )
 
         # -- add_step ----------------------------------------------------------
         elif operation == "add_step":
@@ -346,18 +394,23 @@ def update_project_todo(
                     "step_description='Fix missing __init__.py')]"
                 )
 
-            new_step = step_description.strip()
-            _current_steps.append(new_step)
-            _current_step_statuses.append(" ")
-            _current_step_notes.append("")
-            new_index = len(_current_steps) - 1
+            # Normalise to list
+            if isinstance(step_description, str):
+                new_steps = [step_description.strip()]
+            else:
+                new_steps = [s.strip() for s in step_description if s.strip()]
 
-            _rewrite_steps_in_file(todo_path)
+            first_index = len(_current_steps)
+            for s in new_steps:
+                _current_steps.append(s)
+                _current_step_statuses.append(" ")
+                _current_step_notes.append("")
+                _append_step_to_plan(todo_path, s)
 
-            logger.info(f"[todo_tools] add_step: index {new_index} — '{new_step}'")
+            logger.info(f"[todo_tools] add_step: added {len(new_steps)} step(s) starting at index {first_index}")
             return (
-                f"update_project_todo: New step added at index {new_index}\n"
-                f"Step: {new_step}\n"
+                f"update_project_todo: {len(new_steps)} step(s) added starting at index {first_index}\n"
+                f"Steps: {new_steps}\n"
                 f"Total steps: {len(_current_steps)}"
             )
 
