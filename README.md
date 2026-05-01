@@ -8,6 +8,8 @@ Built on **Google's Gemma 4 models** (free tier) and powered by completely free 
 
 > **Active Development** — This project is actively being improved with new features and agents continuously added. Contributions and feedback are welcome.
 
+**Please** ⭐ Star this repo to support the development of the project and motivate me to build new features!
+
 ---
 
 ## Video Demos

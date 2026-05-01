@@ -283,12 +283,24 @@ def _process_mrkdwn(part: str) -> str:
             processed.append("")
             continue
 
-        # Headings: # Heading → *Heading*  (strip the #s, bold the rest)
+        # Headings: # Heading → Slack formatted heading
         heading_match = re.match(r"^(#{1,6})\s+(.+)$", line)
         if heading_match:
-            # Tokenize the heading text so inline formatting inside headings works
-            inner = _tokenize_inline(heading_match.group(2))
-            processed.append(f"*{inner}*")
+            raw_heading = heading_match.group(2)
+            # If the heading contains a **bold** portion, split into two parts:
+            #   prefix text (before the bold) → _italic_
+            #   **bold part**                  → *bold*
+            # e.g. "### 1. The 'Productivity' Route: **Smart Pomodoro Timer**"
+            #   → "_1. The 'Productivity' Route:_ *Smart Pomodoro Timer*"
+            bold_split = re.match(r"^(.+?)\s*\*{2}(.+?)\*{2}\s*$", raw_heading)
+            if bold_split:
+                prefix = bold_split.group(1).strip()
+                title  = bold_split.group(2).strip()
+                processed.append(f"_{prefix}_ *{title}*")
+            else:
+                # Plain heading — no bold portion → italic the whole line
+                flat = re.sub(r"_{1,2}([^_]+)_{1,2}", r"\1", raw_heading)  # strip any existing _x_
+                processed.append(f"_{flat.strip()}_")
             continue
 
         # Unordered list items: - item / * item → • item
