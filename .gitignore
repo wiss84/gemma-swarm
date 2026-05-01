@@ -78,6 +78,9 @@ coding_thread_registry.json
 coding_session_settings.json
 agent_context_usage.json
 
+# Debug files
+debug_context_dump.txt
+
 # Test/Coverage
 .pytest_cache/
 .coverage

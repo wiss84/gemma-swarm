@@ -36,6 +36,67 @@ TOKENS_PER_CHAR    = 3.2          # conservative estimate for Gemma 4 code/Engli
 DEFAULT_MAX_CTX    = 256_000
 
 
+
+# ── DEBUG: raw context dump ─────────────────────────────────────────────────────
+
+def _dump_raw_context(
+    session_id:    str,
+    system_prompt: str,
+    messages:      list,
+    schema_chars:  int,
+    context_tokens: int,
+    percent:       float,
+    max_ctx:       int,
+):
+    """
+    Writes a human-readable dump of the full model context to:
+        <PROJECT_ROOT>/debug_context_dump.txt
+    Comment out the call below when you're done inspecting.
+    """
+    dump_file = PROJECT_ROOT / "debug_context_dump.txt"
+    try:
+        with open(dump_file, "w", encoding="utf-8") as f:
+            f.write("=" * 80 + "\n")
+            f.write(f"CONTEXT DUMP  —  {datetime.now().isoformat(timespec='seconds')}\n")
+            f.write(f"session_id : {session_id}\n")
+            f.write(f"tokens     : {context_tokens:,} / {max_ctx:,}  ({percent:.2f}%)\n")
+            f.write("=" * 80 + "\n\n")
+
+            # ── System prompt ──
+            f.write("── SYSTEM PROMPT " + "─" * 62 + "\n")
+            f.write(system_prompt)
+            f.write("\n\n")
+
+            # ── Messages ──
+            f.write("── MESSAGES " + "─" * 67 + "\n")
+            for i, m in enumerate(messages):
+                role = type(m).__name__          # HumanMessage / AIMessage / ToolMessage …
+                content = m.content if isinstance(m.content, str) else str(m.content)
+                f.write(f"\n[{i}] {role}\n{content}\n")
+            f.write("\n")
+
+            # ── Tool schema size ──
+            f.write("── TOOL SCHEMAS " + "─" * 63 + "\n")
+            f.write(f"Estimated chars in tool schemas: {schema_chars:,}\n")
+            f.write("(full schema not serialised here — call agent._build_tools_schema() to inspect)\n\n")
+
+            # ── Char breakdown ──
+            sys_chars = len(system_prompt)
+            msg_chars = sum(
+                len(m.content) if isinstance(m.content, str) else len(str(m.content))
+                for m in messages
+            )
+            f.write("── CHAR BREAKDOWN " + "─" * 61 + "\n")
+            f.write(f"  system prompt : {sys_chars:>10,} chars\n")
+            f.write(f"  messages      : {msg_chars:>10,} chars\n")
+            f.write(f"  tool schemas  : {schema_chars:>10,} chars\n")
+            f.write(f"  total         : {sys_chars + msg_chars + schema_chars:>10,} chars\n")
+            f.write(f"  ÷ {TOKENS_PER_CHAR} chars/tok → {context_tokens:,} tokens\n")
+
+        logger.debug(f"[context_tracker] Raw context dumped → {dump_file}")
+    except Exception as e:
+        logger.warning(f"[context_tracker] Could not write context dump: {e}")
+
 # ── Tool schema char estimator (coding agent only) ─────────────────────────────
 
 def _estimate_tool_schema_chars(agent_notes_enabled: bool = True, workspace_path: str = "") -> int:
@@ -109,6 +170,8 @@ def snapshot_context_usage(
     total_chars    = system_chars + message_chars + schema_chars
     context_tokens = max(1, int(total_chars / TOKENS_PER_CHAR))
     percent        = round((context_tokens / max_ctx) * 100, 2)
+    # DEBUG — comment out when done ↓
+    # _dump_raw_context(session_id, system_prompt, messages, schema_chars, context_tokens, percent, max_ctx)
 
     logger.debug(
         f"[context_tracker] session={session_id[:12]}... "
