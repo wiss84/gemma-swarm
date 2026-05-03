@@ -32,7 +32,7 @@ from agents_utils.config import LABEL
 
 logger = logging.getLogger(__name__)
 
-SLACK_SAFE_CHARS = 2800
+SLACK_SAFE_CHARS = 3800
 
 # ── Sentinel ──────────────────────────────────────────────────────────────────
 # Inserted where the markdown table was.  Travels through _markdown_to_slack
