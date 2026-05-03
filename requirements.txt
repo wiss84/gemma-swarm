@@ -37,4 +37,4 @@ lxml                                # For Excel spreadsheet processing and Web s
 trafilatura                         # For advanced web page content extraction (main content detection)
 tree-sitter==0.22                   # For building a concrete syntax tree for a source files
 tree-sitter-language-pack==1.6.2    # Grammer for tree-sitter
-customtkinter                       # to for tokens tracker UI
+flet>=0.84.0                        # to for tokens tracker UI

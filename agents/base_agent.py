@@ -32,6 +32,7 @@ from langchain_core.tools import BaseTool
 from agents_utils.config import MODELS, LABEL, MAX_TOOL_ITERATIONS
 from agents_utils.rate_limit_handler import RateLimitHandler
 from agents_utils.json_parser import _extract_json
+from agents_utils.token_activity_tracker import record_token_event, estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,47 @@ class BaseAgent(ABC):
 
         raw = self._extract_response_content(response)
         logger.debug(f"[{self.agent_name}] Response: {raw[:100]}")
+
+        # ── Token activity tracking ────────────────────────────────────────────
+        # Records for all agents that have _current_session_id injected.
+        session_id   = getattr(self, "_current_session_id", "")
+        project_name = getattr(self, "_current_project_name", "")
+        if session_id:
+            # Input: all messages sent this turn
+            record_token_event(
+                session_id=session_id,
+                event_type="llm_input",
+                token_count=input_tokens,
+                model=self.model_name,
+                project_name=project_name,
+            )
+            # Output: the response text
+            if raw:
+                # Detect thinking content separately
+                content = response.content
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            btype = block.get("type", "")
+                            btext = block.get("text", "") or block.get("thinking", "")
+                            if btext:
+                                etype = "thinking" if btype == "thinking" else "llm_output"
+                                record_token_event(
+                                    session_id=session_id,
+                                    event_type=etype,
+                                    token_count=estimate_tokens(btext),
+                                    model=self.model_name,
+                                    project_name=project_name,
+                                )
+                else:
+                    record_token_event(
+                        session_id=session_id,
+                        event_type="llm_output",
+                        token_count=estimate_tokens(raw),
+                        model=self.model_name,
+                        project_name=project_name,
+                    )
+
         return response
 
     # ── Native tool loop (Gemma 4 / Gemini) ──────────────────────────────────
@@ -291,6 +333,25 @@ class BaseAgent(ABC):
                     # logger.info(f"[{self.agent_name}] Tool call (native): {tool_name}")
                     tool_result = self._execute_tool(tool_name, tool_args)
                     # logger.info(f"[{self.agent_name}] Tool result: {tool_result[:100]}")
+
+                    # Track tool token activity
+                    session_id   = getattr(self, "_current_session_id", "")
+                    project_name = getattr(self, "_current_project_name", "")
+                    if session_id:
+                        record_token_event(
+                            session_id=session_id,
+                            event_type="tool_input",
+                            token_count=estimate_tokens(str(tool_args)),
+                            model=self.model_name,
+                            project_name=project_name,
+                        )
+                        record_token_event(
+                            session_id=session_id,
+                            event_type="tool_output",
+                            token_count=estimate_tokens(tool_result),
+                            model=self.model_name,
+                            project_name=project_name,
+                        )
 
                     # Detect task completion signal from the todo tool.
                     # Guard: only honour the sentinel when it comes from update_project_todo.

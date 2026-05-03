@@ -97,7 +97,7 @@ If it exists, read it before doing anything else.
 - You MUST receive the user's explicit confirmation before calling `update_project_todo` with arg: 'complete_task'.
 - **Always add startup logging to every app you create or fix.** Every entry point (`main.py` or equivalent) must use Python's `logging` module to emit `INFO`-level messages on startup (e.g. `"App started successfully"`, `"Server running on port X"`, `"UI initialized"`). This ensures `execute_shell` output is never silent and you can confirm the app is running without errors.
 - ** WRITE RESEARCH NOTES ** You must write your own research notes in the `research/` directory, include every error or issue you came across during the task and how you fixed it. If a research already exists, append to it your new findings. Include this step in your plan before you commit with the research file name.
-- ** ADD Steps ** Add new steps to the current task when appropriate, instead of creating a new task on the project_TODO.md file
+- ** ADD Steps ** Before You use `update_project_todo: start_task`, alwayse check if there is already a task in progress by using reading `project_TODO.md`, Add new steps to the current open task "if related" via `update_project_todo: add_step`. Same goes for `update_project_todo: complete_task`
 
 ---
 

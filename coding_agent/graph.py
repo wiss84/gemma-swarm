@@ -100,6 +100,9 @@ def coding_agent_node(state: CodingAgentState) -> dict:
         agent_notes_enabled=agent_notes_enabled,
         status_callback=status_callback,
     )
+    # Inject session_id so base_agent._call_llm can record token activity
+    agent._current_session_id = session_id
+    agent._current_project_name = state.get("project_name", "")
 
     result_text, parsed = agent.run(
         messages=state.get("messages", []),
@@ -245,6 +248,12 @@ def reset_node(state: CodingAgentState) -> dict:
 
     if task_complete:
         logger.info("[reset_node] Task complete — wiping message history for next task")
+        # Also reset token activity so the chart starts fresh for the next task
+        try:
+            from agents_utils.token_activity_tracker import reset_session
+            reset_session(state.get("session_id", ""))
+        except Exception:
+            pass
         return {"messages": [], "task_complete": False}
     return {}
 

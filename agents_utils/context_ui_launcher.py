@@ -44,9 +44,9 @@ def launch_context_ui():
     try:
         kwargs = dict(
             args=[sys.executable, str(UI_SCRIPT)],
-            # Detach from our console so it gets its own window / no console at all
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
-            # Suppress output so it doesn't pollute the backend terminal
+            # On Windows: spawn without attaching to the backend's console
+            # CREATE_NO_WINDOW keeps it silent; Flet opens its own GUI window.
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

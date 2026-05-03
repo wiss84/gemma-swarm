@@ -78,28 +78,57 @@ def _task_classifier(state: AgentState) -> dict:
 def _planner(state: AgentState) -> dict:
     return planner_agent_node(state)
 
+def _inject_session(state: AgentState) -> None:
+    """
+    Inject session_id and project_name onto all supervisor-flow agent singletons
+    so that base_agent._call_llm can record token activity for every agent.
+    Called at the top of every agent node wrapper.
+    """
+    session_id   = state.get("slack_thread_ts", "")
+    project_name = f"assistant\\{state.get('project_name', '')}"
+    for agent_fn in [
+        get_supervisor_agent, get_researcher_agent, get_deep_researcher_agent,
+        get_email_composer_agent, get_linkedin_composer_agent,
+        get_memory_agent, get_docs_agent, get_calendar_agent,
+        get_sheets_agent, get_gmail_agent, get_task_classifier_agent,
+        get_planner_agent,
+    ]:
+        try:
+            agent = agent_fn()
+            agent._current_session_id    = session_id
+            agent._current_project_name  = project_name
+        except Exception:
+            pass
+
+
 def _supervisor(state: AgentState) -> dict:
+    _inject_session(state)
     return supervisor_agent_node(state)
 
 def _researcher(state: AgentState) -> dict:
+    _inject_session(state)
     return researcher_agent_node(state)
 
 def _deep_researcher(state: AgentState) -> dict:
+    _inject_session(state)
     return deep_researcher_agent_node(state)
 
 def _email_composer(state: AgentState) -> dict:
+    _inject_session(state)
     return email_composer_node(state)
 
 def _email_send(state: AgentState) -> dict:
     return email_send_node(state)
 
 def _linkedin_composer(state: AgentState) -> dict:
+    _inject_session(state)
     return linkedin_composer_node(state)
 
 def _linkedin_send(state: AgentState) -> dict:
     return linkedin_send_node(state)
 
 def _memory(state: AgentState) -> dict:
+    _inject_session(state)
     return memory_agent_node(state)
 
 def _validator(state: AgentState) -> dict:
@@ -109,15 +138,19 @@ def _output_formatter(state: AgentState) -> dict:
     return output_formatter_node(state)
 
 def _docs_agent(state: AgentState) -> dict:
+    _inject_session(state)
     return docs_agent_node(state)
 
 def _calendar_agent(state: AgentState) -> dict:
+    _inject_session(state)
     return calendar_agent_node(state)
 
 def _sheets_agent(state: AgentState) -> dict:
+    _inject_session(state)
     return sheets_agent_node(state)
 
 def _gmail_agent(state: AgentState) -> dict:
+    _inject_session(state)
     return gmail_agent_node(state)
 
 

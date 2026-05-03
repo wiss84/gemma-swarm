@@ -1,60 +1,76 @@
 """
-Gemma Swarm — Agent Context Usage UI
-======================================
-A small always-on-top desktop widget that shows the current context window
-usage for the active agent session (coding or supervisor).
+Gemma Swarm — Agent Context Usage UI  (Flet edition)
+======================================================
+Two separate metrics displayed:
 
-Usage:
-    python agents_utils/context_ui.py
-    (launched automatically by the backend on first response)
+  TOP CHART (Token Activity — from agent_token_activity.json):
+    Running total of ALL tokens consumed in this session:
+    user input + agent output + tool inputs + tool outputs + thinking.
+    Drawn with ft.Canvas so it renders correctly without SVG/image issues.
 
-Behaviour:
-    - Polls agent_context_usage.json every 1 second in a background thread.
-    - Automatically switches to whichever session was updated most recently.
-    - Shows project name, model, percentage bar, token counts, and last update.
-    - Colour-coded progress bar: green -> yellow -> orange -> red.
-    - Custom frameless window with draggable titlebar and minimize button.
-    - Always floats on top of other windows.
+  BOTTOM BAR (Context Window Fill — from agent_context_usage.json):
+    How full the model's current context window is right now.
+    This is what context_tracker.py calculates.
 
-Dependencies:
-    pip install customtkinter
+The UI auto-polls both files every second and updates without needing
+a mouse click — fixed by bridging background-thread updates through
+page.run_thread() as required by Flet desktop.
 """
 
+from __future__ import annotations
+
 import json
-import sys
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
-import customtkinter as ctk
+import flet as ft
+import flet.canvas as cv
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# ── Paths ──────────────────────────────────────────────────────────────────────
 
-SCRIPT_DIR         = Path(__file__).resolve().parent
-PROJECT_ROOT       = SCRIPT_DIR.parent  # agents_utils/ -> project root
-CONTEXT_USAGE_FILE = PROJECT_ROOT / "agent_context_usage.json"
+SCRIPT_DIR            = Path(__file__).resolve().parent
+PROJECT_ROOT          = SCRIPT_DIR.parent
+CONTEXT_USAGE_FILE    = PROJECT_ROOT / "agent_context_usage.json"
+TOKEN_ACTIVITY_FILE   = PROJECT_ROOT / "agent_token_activity.json"
 
-POLL_INTERVAL = 1.0   # seconds
+POLL_INTERVAL = 1.0
 MAX_CONTEXT   = 256_000
 
-WIN_W, WIN_H  = 380, 228
-TITLE_H       = 32   # height of custom title bar
+# ── Window ─────────────────────────────────────────────────────────────────────
 
+WIN_W = 420
+WIN_H = 490
 
-# ── Colour helpers ────────────────────────────────────────────────────────────
+# ── Palette ────────────────────────────────────────────────────────────────────
+
+BG_DARK    = "#0d1117"
+BG_CARD    = "#161b22"
+BORDER_CLR = "#30363d"
+TEXT_PRI   = "#e6edf3"
+TEXT_SEC   = "#8b949e"
+TEXT_ACC   = "#58a6ff"
+
+CHART_LINE = "#58a6ff"
+CHART_FILL = "#1f3a5f"
+CHART_GRID = "#21262d"
+
+CHART_W = 388
+CHART_H = 90
+
 
 def _bar_color(pct: float) -> str:
-    if pct < 40:  return "#2ecc71"
-    if pct < 65:  return "#f1c40f"
-    if pct < 85:  return "#e67e22"
-    return "#e74c3c"
+    if pct < 40:  return "#3fb950"
+    if pct < 65:  return "#d29922"
+    if pct < 85:  return "#f0883e"
+    return "#f85149"
 
 
-# ── Data reader ───────────────────────────────────────────────────────────────
+# ── File readers ────────────────────────────────────────────────────────────────
 
-def _read_active_session() -> dict | None:
-    """Return the entry with the most recent last_updated, or None."""
+def _read_context_session() -> dict | None:
+    """Most-recent entry from agent_context_usage.json."""
     try:
         if not CONTEXT_USAGE_FILE.exists():
             return None
@@ -70,230 +86,403 @@ def _read_active_session() -> dict | None:
         return None
 
 
-# ── Main UI ───────────────────────────────────────────────────────────────────
+def _read_activity_session() -> dict | None:
+    """Most-recent entry from agent_token_activity.json."""
+    try:
+        if not TOKEN_ACTIVITY_FILE.exists():
+            return None
+        with open(TOKEN_ACTIVITY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not data:
+            return None
+        best = max(data.keys(), key=lambda sid: data[sid].get("last_updated", ""))
+        return data[best]
+    except Exception:
+        return None
 
-class ContextUI(ctk.CTk):
 
-    def __init__(self):
-        super().__init__()
+# ── Canvas chart builder ────────────────────────────────────────────────────────
 
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("dark-blue")
+def _build_chart_shapes(datapoints: list[dict], w: int = CHART_W, h: int = CHART_H) -> list:
+    """
+    Build a list of ft.canvas shapes for the cumulative token line chart.
+    datapoints: list of {"cumulative": int, ...}
+    Returns list of cv.Shape objects.
+    """
+    pad_l, pad_r, pad_t, pad_b = 6, 6, 8, 6
+    chart_w = w - pad_l - pad_r
+    chart_h = h - pad_t - pad_b
 
-        # ── Frameless, always on top ─────────────────────────────────────────
-        self.overrideredirect(True)   # remove native title bar / frame
-        self.attributes("-topmost", True)
-        self.wm_attributes("-alpha", 0.96)
+    shapes = []
 
-        self.geometry(f"{WIN_W}x{WIN_H}")
-        self._center_window()
+    # Background
+    shapes.append(cv.Rect(
+        x=0, y=0, width=w, height=h,
+        paint=ft.Paint(color=BG_CARD),
+    ))
 
-        # ── Drag state ───────────────────────────────────────────────────────
-        self._drag_x = 0
-        self._drag_y = 0
+    # Grid lines at 25%, 50%, 75%
+    for frac in (0.25, 0.5, 0.75):
+        gy = round(pad_t + chart_h - frac * chart_h)
+        shapes.append(cv.Line(
+            x1=pad_l, y1=gy, x2=w - pad_r, y2=gy,
+            paint=ft.Paint(
+                color=CHART_GRID,
+                stroke_width=0.8,
+            ),
+        ))
 
-        # ── Internal state ───────────────────────────────────────────────────
-        self._last_session_id = None
-        self._minimized       = False
+    if len(datapoints) < 2:
+        # "waiting" label drawn as a Path text is awkward — just skip, the
+        # label_chart_status text below the chart handles the empty state.
+        return shapes
 
-        # ── Root frame (rounded feel via bg colour) ───────────────────────────
-        self._root_frame = ctk.CTkFrame(self, corner_radius=10, fg_color="#1a1a2e")
-        self._root_frame.pack(fill="both", expand=True)
+    vals = [p["cumulative"] for p in datapoints]
+    y_max = max(max(vals), 1)
+    n = len(vals)
 
-        # ── Custom title bar ─────────────────────────────────────────────────
-        self._titlebar = ctk.CTkFrame(
-            self._root_frame, height=TITLE_H,
-            fg_color="#16213e", corner_radius=0,
+    def pt(i: int, v: int):
+        x = pad_l + (i / max(n - 1, 1)) * chart_w
+        y = pad_t + chart_h - (v / y_max) * chart_h
+        return round(x, 1), round(y, 1)
+
+    pts = [pt(i, v) for i, v in enumerate(vals)]
+
+    # Filled area polygon
+    bottom_y = pad_t + chart_h
+    poly_pts = [(pts[0][0], bottom_y)] + pts + [(pts[-1][0], bottom_y)]
+    shapes.append(cv.Path(
+        elements=[
+            cv.Path.MoveTo(x=poly_pts[0][0], y=poly_pts[0][1]),
+            *[cv.Path.LineTo(x=x, y=y) for x, y in poly_pts[1:]],
+            cv.Path.Close(),
+        ],
+        paint=ft.Paint(color=CHART_FILL, style=ft.PaintingStyle.FILL),
+    ))
+
+    # Line
+    shapes.append(cv.Path(
+        elements=[
+            cv.Path.MoveTo(x=pts[0][0], y=pts[0][1]),
+            *[cv.Path.LineTo(x=x, y=y) for x, y in pts[1:]],
+        ],
+        paint=ft.Paint(
+            color=CHART_LINE,
+            stroke_width=2.0,
+            stroke_join=ft.StrokeJoin.ROUND,
+            stroke_cap=ft.StrokeCap.ROUND,
+            style=ft.PaintingStyle.STROKE,
+        ),
+    ))
+
+    # Trailing dot
+    lx, ly = pts[-1]
+    dot_color = _bar_color(0)  # activity chart: no context% — use accent colour
+    shapes.append(cv.Circle(
+        x=lx, y=ly, radius=4,
+        paint=ft.Paint(color=dot_color),
+    ))
+
+    return shapes
+
+
+# ── App ────────────────────────────────────────────────────────────────────────
+
+def main(page: ft.Page):
+    page.title      = "⚙ Context Monitor"
+    page.bgcolor    = BG_DARK
+    page.padding    = 10
+    page.theme_mode = ft.ThemeMode.DARK
+
+    page.window.width          = WIN_W
+    page.window.height         = WIN_H
+    page.window.min_width      = WIN_W
+    page.window.min_height     = WIN_H
+    page.window.always_on_top  = True
+    page.window.title_bar_hidden = False
+    page.window.resizable      = False
+
+    # ── Controls ───────────────────────────────────────────────────────────────
+
+    lbl_project_label = ft.Text("PROJECT", size=9, color=TEXT_SEC,
+                                weight=ft.FontWeight.W_600,
+                                style=ft.TextStyle(letter_spacing=1.2))
+    lbl_workspace = ft.Text("— waiting for session —", size=13,
+                            weight=ft.FontWeight.BOLD, color=TEXT_SEC)
+    lbl_model_label = ft.Text("MODEL", size=9, color=TEXT_SEC,
+                              weight=ft.FontWeight.W_600,
+                              style=ft.TextStyle(letter_spacing=1.2))
+    lbl_model     = ft.Text("", size=13, weight=ft.FontWeight.BOLD, color=TEXT_SEC)
+
+    # ── Activity chart section ─────────────────────────────────────────────────
+    _activity_tooltip = ft.Tooltip(
+        message=(
+            "Cumulative tokens processed this session.\n"
+            "Includes: LLM input, LLM output, tool inputs,\n"
+            "tool outputs, and thinking blocks."
+        ),
+        wait_duration=300,
+        text_style=ft.TextStyle(size=11, color=TEXT_PRI),
+        decoration=ft.BoxDecoration(
+            bgcolor="#1c2128",
+            border_radius=ft.BorderRadius.all(6),
+        ),
+        padding=ft.padding.all(8),
+    )
+    lbl_activity_title = ft.Row(
+        spacing=4,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        tooltip=_activity_tooltip,
+        controls=[
+            ft.Text("Token Activity", size=10,
+                    color=TEXT_SEC, weight=ft.FontWeight.W_500),
+            ft.Container(
+                content=ft.Text("?", size=9, color=TEXT_SEC,
+                                weight=ft.FontWeight.BOLD),
+                width=14, height=14,
+                border_radius=7,
+                border=ft.border.all(1, TEXT_SEC),
+                alignment=ft.Alignment(0, 0),
+            ),
+        ],
+    )
+    lbl_cumulative = ft.Text("0 tokens total", size=13,
+                              weight=ft.FontWeight.W_600, color=TEXT_ACC)
+
+    # ft.canvas.Canvas for drawing the line chart
+    chart_canvas = cv.Canvas(
+        shapes=_build_chart_shapes([]),
+        width=CHART_W,
+        height=CHART_H,
+    )
+    lbl_chart_status = ft.Text("waiting for data...", size=10,
+                                color=TEXT_SEC, italic=True,
+                                text_align=ft.TextAlign.CENTER)
+
+    # ── Context window section ─────────────────────────────────────────────────
+    lbl_percent  = ft.Text("0.00%", size=36, weight=ft.FontWeight.BOLD, color="#3fb950")
+    progress_bar = ft.ProgressBar(
+        value=0.0, width=CHART_W, height=10,
+        color="#3fb950", bgcolor="#21262d",
+        border_radius=ft.BorderRadius.all(5),
+    )
+    lbl_tokens  = ft.Text("0 / 256,000 tokens", size=11, color=TEXT_SEC)
+    lbl_updated = ft.Text("", size=10, color="#484f58")
+
+    # ── Layout helpers ─────────────────────────────────────────────────────────
+
+    def _divider():
+        return ft.Container(height=1, bgcolor=BORDER_CLR,
+                            margin=ft.margin.symmetric(vertical=5))
+
+    page.add(
+        ft.Container(
+            bgcolor=BG_CARD,
+            border_radius=10,
+            border=ft.border.all(1, BORDER_CLR),
+            padding=0,
+            content=ft.Column(
+                spacing=0,
+                controls=[
+                    # Header: workspace + model
+                    ft.Container(
+                        padding=ft.padding.only(left=16, right=16, top=12, bottom=8),
+                        content=ft.Column(
+                            spacing=2,
+                            controls=[
+                                lbl_project_label,
+                                lbl_workspace,
+                                ft.Container(height=4),
+                                lbl_model_label,
+                                lbl_model,
+                            ],
+                        ),
+                    ),
+                    _divider(),
+                    # Activity chart
+                    ft.Container(
+                        padding=ft.padding.symmetric(horizontal=16, vertical=8),
+                        content=ft.Column(
+                            spacing=6,
+                            controls=[
+                                ft.Row(
+                                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                    controls=[lbl_activity_title, lbl_cumulative],
+                                ),
+                                ft.Container(
+                                    content=ft.Stack([
+                                        chart_canvas,
+                                        ft.Container(
+                                        content=lbl_chart_status,
+                                        alignment=ft.Alignment.CENTER,
+                                        width=CHART_W,
+                                        height=CHART_H,
+                                        ),
+                                    ]),
+                                    border=ft.border.all(1, BORDER_CLR),
+                                    border_radius=6,
+                                    bgcolor=BG_CARD,
+                                    clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                                ),
+                            ],
+                        ),
+                    ),
+                    _divider(),
+                    # Context window % + bar + counts
+                    ft.Container(
+                        padding=ft.padding.only(left=16, right=16, top=8, bottom=16),
+                        content=ft.Column(
+                            spacing=4,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            controls=[
+                            ft.Row(
+                                spacing=4,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            tooltip=ft.Tooltip(
+                            message=(
+                            "Current fill level of the model's context window.\n"
+                            "Calculated from: system prompt + message history\n"
+                            "+ tool schemas currently loaded.\n"
+                            "Does NOT include tool inputs/outputs or thinking."
+                            ),
+                            wait_duration=300,
+                            text_style=ft.TextStyle(size=11, color=TEXT_PRI),
+                            decoration=ft.BoxDecoration(
+                                bgcolor="#1c2128",
+                                border_radius=ft.BorderRadius.all(6),
+                            ),
+                            padding=ft.padding.all(8),
+                            ),
+                            controls=[
+                            ft.Text("Context Window", size=10,
+                            color=TEXT_SEC,
+                            weight=ft.FontWeight.W_500),
+                            ft.Container(
+                            content=ft.Text("?", size=9,
+                                color=TEXT_SEC,
+                                    weight=ft.FontWeight.BOLD),
+                            width=14, height=14,
+                            border_radius=7,
+                                border=ft.border.all(1, TEXT_SEC),
+                                        alignment=ft.Alignment(0, 0),
+                                    ),
+                                ],
+                            ),
+                                ft.Container(height=2),
+                                ft.Row(
+                                    alignment=ft.MainAxisAlignment.CENTER,
+                                    controls=[lbl_percent],
+                                ),
+                                ft.Container(height=2),
+                                progress_bar,
+                                ft.Container(height=4),
+                                ft.Row(
+                                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                    controls=[lbl_tokens, lbl_updated],
+                                ),
+                            ],
+                        ),
+                    ),
+                ],
+            ),
         )
-        self._titlebar.pack(fill="x", side="top")
-        self._titlebar.pack_propagate(False)
+    )
 
-        self._title_lbl = ctk.CTkLabel(
-            self._titlebar,
-            text="⚙  Context Monitor",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="#88aaff",
-            anchor="w",
-        )
-        self._title_lbl.pack(side="left", padx=10)
+    # ── State ──────────────────────────────────────────────────────────────────
 
-        # Minimize button
-        self._min_btn = ctk.CTkButton(
-            self._titlebar,
-            text="—",
-            width=28, height=22,
-            fg_color="#2a2a4a",
-            hover_color="#3a3a6a",
-            text_color="#cccccc",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            corner_radius=4,
-            command=self._toggle_minimize,
-        )
-        self._min_btn.pack(side="right", padx=(4, 8), pady=4)
+    _state = {"running": True}
 
-        # Drag bindings on titlebar and its children
-        for widget in (self._titlebar, self._title_lbl):
-            widget.bind("<ButtonPress-1>",   self._drag_start)
-            widget.bind("<B1-Motion>",        self._drag_move)
+    # ── UI update (runs on Flet's main thread via page.run_thread) ─────────────
 
-        # ── Content frame (hidden when minimized) ────────────────────────────
-        self._content = ctk.CTkFrame(self._root_frame, fg_color="transparent")
-        self._content.pack(fill="both", expand=True, padx=14, pady=(6, 12))
+    def _apply_update(ctx_entry, act_entry):
+        """Called on Flet's main thread — safe to mutate controls here."""
 
-        pad = {"padx": 0, "pady": 3}
-
-        self._lbl_project = ctk.CTkLabel(
-            self._content,
-            text="— waiting for session —",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            anchor="w",
-        )
-        self._lbl_project.pack(fill="x", **pad)
-
-        self._lbl_model = ctk.CTkLabel(
-            self._content,
-            text="",
-            font=ctk.CTkFont(size=11),
-            text_color="#7788bb",
-            anchor="w",
-        )
-        self._lbl_model.pack(fill="x", pady=(0, 4))
-
-        self._lbl_percent = ctk.CTkLabel(
-            self._content,
-            text="0.00%",
-            font=ctk.CTkFont(size=30, weight="bold"),
-            text_color="#2ecc71",
-        )
-        self._lbl_percent.pack(pady=(2, 4))
-
-        self._bar = ctk.CTkProgressBar(
-            self._content, width=340, height=16, corner_radius=6,
-        )
-        self._bar.set(0)
-        self._bar.configure(progress_color="#2ecc71")
-        self._bar.pack(pady=4)
-
-        self._lbl_tokens = ctk.CTkLabel(
-            self._content,
-            text="0 / 256,000 tokens",
-            font=ctk.CTkFont(size=11),
-            text_color="#aaaaaa",
-        )
-        self._lbl_tokens.pack(**pad)
-
-        self._lbl_updated = ctk.CTkLabel(
-            self._content,
-            text="",
-            font=ctk.CTkFont(size=10),
-            text_color="#555577",
-        )
-        self._lbl_updated.pack(**pad)
-
-        # ── Start polling ────────────────────────────────────────────────────
-        self._running     = True
-        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._poll_thread.start()
-
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    # ── Window centering ──────────────────────────────────────────────────────
-
-    def _center_window(self):
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        x  = sw - WIN_W - 30
-        y  = sh - WIN_H - 60  # near bottom-right, above taskbar
-        self.geometry(f"{WIN_W}x{WIN_H}+{x}+{y}")
-
-    # ── Drag handlers ─────────────────────────────────────────────────────────
-
-    def _drag_start(self, event):
-        self._drag_x = event.x_root - self.winfo_x()
-        self._drag_y = event.y_root - self.winfo_y()
-
-    def _drag_move(self, event):
-        x = event.x_root - self._drag_x
-        y = event.y_root - self._drag_y
-        self.geometry(f"+{x}+{y}")
-
-    # ── Minimize / restore ────────────────────────────────────────────────────
-
-    def _toggle_minimize(self):
-        if self._minimized:
-            # Restore
-            self._content.pack(fill="both", expand=True, padx=14, pady=(6, 12))
-            self.geometry(f"{WIN_W}x{WIN_H}")
-            self._min_btn.configure(text="—")
-            self._minimized = False
+        # ── Header ──────────────────────────────────────────────────────────
+        if ctx_entry:
+            project = ctx_entry.get("project_name", "unknown")
+            model   = ctx_entry.get("model", "")
+            lbl_workspace.value = project
+            lbl_workspace.color = TEXT_ACC
+            lbl_model.value     = model
+            lbl_model.color     = TEXT_ACC
+        elif act_entry:
+            project = act_entry.get("project_name", "unknown")
+            model   = act_entry.get("model", "")
+            lbl_workspace.value = project
+            lbl_workspace.color = TEXT_ACC
+            lbl_model.value     = model
+            lbl_model.color     = TEXT_ACC
         else:
-            # Collapse to title-bar only
-            self._content.pack_forget()
-            self.geometry(f"{WIN_W}x{TITLE_H}")
-            self._min_btn.configure(text="□")
-            self._minimized = True
+            lbl_workspace.value = "— waiting for session —"
+            lbl_workspace.color = TEXT_SEC
+            lbl_model.value     = ""
 
-    # ── Polling ───────────────────────────────────────────────────────────────
+        # ── Activity chart ───────────────────────────────────────────────────
+        if act_entry:
+            cumulative = int(act_entry.get("cumulative_tokens", 0))
+            datapoints = act_entry.get("datapoints", [])
+            lbl_cumulative.value = f"{cumulative:,} tokens total"
+            chart_canvas.shapes = _build_chart_shapes(datapoints)
+            lbl_chart_status.value  = "" if len(datapoints) >= 2 else "waiting for data..."
+            lbl_chart_status.visible = len(datapoints) < 2
+        else:
+            lbl_cumulative.value    = "0 tokens total"
+            chart_canvas.shapes     = _build_chart_shapes([])
+            lbl_chart_status.value   = "waiting for data..."
+            lbl_chart_status.visible = True
 
-    def _poll_loop(self):
-        while self._running:
-            entry = _read_active_session()
-            self.after(0, self._update_ui, entry)
+        # ── Context window bar ───────────────────────────────────────────────
+        if ctx_entry:
+            percent  = float(ctx_entry.get("context_percent", 0.0))
+            tokens   = int(ctx_entry.get("context_tokens", 0))
+            max_ctx  = int(ctx_entry.get("max_context", MAX_CONTEXT))
+            last_upd = ctx_entry.get("last_updated", "")
+            color    = _bar_color(percent)
+
+            lbl_percent.value     = f"{percent:.2f}%"
+            lbl_percent.color     = color
+            progress_bar.value    = min(percent / 100.0, 1.0)
+            progress_bar.color    = color
+            lbl_tokens.value      = f"{tokens:,} / {max_ctx:,} tokens"
+            if last_upd:
+                try:
+                    lbl_updated.value = datetime.fromisoformat(last_upd).strftime("updated %H:%M:%S")
+                except Exception:
+                    lbl_updated.value = last_upd
+        else:
+            lbl_percent.value     = "0.00%"
+            lbl_percent.color     = "#3fb950"
+            progress_bar.value    = 0.0
+            progress_bar.color    = "#3fb950"
+            lbl_tokens.value      = "0 / 256,000 tokens"
+            lbl_updated.value     = ""
+
+        page.update()
+
+    # ── Poll loop ──────────────────────────────────────────────────────────────
+    # page.run_thread() schedules the callable on Flet's main event loop,
+    # which is required for UI updates to render without needing a mouse click.
+
+    def _poll_loop():
+        while _state["running"]:
+            try:
+                ctx_entry = _read_context_session()
+                act_entry = _read_activity_session()
+                page.run_thread(_apply_update, ctx_entry, act_entry)
+            except Exception:
+                pass
             time.sleep(POLL_INTERVAL)
 
-    # ── UI update (must run on main thread via after()) ───────────────────────
+    threading.Thread(target=_poll_loop, daemon=True).start()
 
-    def _update_ui(self, entry: dict | None):
-        if entry is None:
-            self._lbl_project.configure(text="— waiting for session —")
-            self._lbl_model.configure(text="")
-            self._lbl_percent.configure(text="0.00%", text_color="#2ecc71")
-            self._bar.set(0)
-            self._bar.configure(progress_color="#2ecc71")
-            self._lbl_tokens.configure(text="0 / 256,000 tokens")
-            self._lbl_updated.configure(text="")
-            return
+    def _on_window_event(e: ft.WindowEvent):
+        if e.type == ft.WindowEventType.CLOSE:
+            _state["running"] = False
 
-        project    = entry.get("project_name", "unknown")
-        model      = entry.get("model", "")
-        percent    = float(entry.get("context_percent", 0.0))
-        cumulative = int(entry.get("context_tokens", 0))
-        max_ctx    = int(entry.get("max_context", MAX_CONTEXT))
-        last_upd   = entry.get("last_updated", "")
-        session_id = entry.get("session_id", "")
-
-        # Flash project name briefly on session switch
-        if session_id and session_id != self._last_session_id:
-            self._last_session_id = session_id
-            project = f"↻  {project}"
-
-        color = _bar_color(percent)
-
-        self._lbl_project.configure(text=project)
-        self._lbl_model.configure(text=model)
-        self._lbl_percent.configure(text=f"{percent:.2f}%", text_color=color)
-        self._bar.set(min(percent / 100.0, 1.0))
-        self._bar.configure(progress_color=color)
-        self._lbl_tokens.configure(text=f"{cumulative:,} / {max_ctx:,} tokens")
-
-        if last_upd:
-            try:
-                upd_str = datetime.fromisoformat(last_upd).strftime("updated %H:%M:%S")
-            except Exception:
-                upd_str = last_upd
-        else:
-            upd_str = ""
-        self._lbl_updated.configure(text=upd_str)
-
-    # ── Cleanup ───────────────────────────────────────────────────────────────
-
-    def _on_close(self):
-        self._running = False
-        self.destroy()
+    page.window.on_event = _on_window_event
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    app = ContextUI()
-    app.mainloop()
+    ft.app(target=main)

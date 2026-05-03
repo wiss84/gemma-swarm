@@ -77,6 +77,7 @@ research_history.json
 coding_thread_registry.json
 coding_session_settings.json
 agent_context_usage.json
+agent_token_activity.json
 
 # Debug files
 debug_context_dump.txt
