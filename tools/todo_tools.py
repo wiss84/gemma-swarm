@@ -289,6 +289,21 @@ def update_project_todo(
 
         # -- start_task --------------------------------------------------------
         if operation == "start_task":
+            # Guard: block if there is already an active task in the file.
+            # A completed task also contains '### Status: In Progress' (in its opening block),
+            # so we cannot do a simple string search. Instead we find the LAST status line:
+            # if it says 'In Progress', no Done block has been written yet => active task.
+            if todo_path.exists():
+                file_content = todo_path.read_text(encoding="utf-8")
+                status_lines = re.findall(r"^### Status: (.+)$", file_content, re.MULTILINE)
+                if status_lines and status_lines[-1].strip() == "In Progress":
+                    return (
+                        "[update_project_todo: There is already a Task in progress. "
+                        "Please call `update_project_todo` with operation='add_step' "
+                        "to add more steps to the current task, or complete it first "
+                        "with operation='complete_task'.]"
+                    )
+
             if not task_name or not task_name.strip():
                 return (
                     "[update_project_todo error: task_name is required for start_task. "
@@ -387,7 +402,13 @@ def update_project_todo(
                     "[update_project_todo error: no active task. "
                     "Call start_task before add_step.]"
                 )
-            if not step_description or not step_description.strip():
+            # Guard: validate before calling .strip() — step_description may be a list
+            is_empty = (
+                not step_description
+                or (isinstance(step_description, str) and not step_description.strip())
+                or (isinstance(step_description, list) and not any(s.strip() for s in step_description if isinstance(s, str)))
+            )
+            if is_empty:
                 return (
                     "[update_project_todo error: step_description is required for add_step. "
                     "Example: update_project_todo(operation='add_step', "
@@ -421,6 +442,16 @@ def update_project_todo(
                     "[update_project_todo error: no active task. "
                     "Call start_task before complete_task.]"
                 )
+            # Guard: block if any steps are still unmarked [ ]
+            if todo_path.exists():
+                file_content = todo_path.read_text(encoding="utf-8")
+                if re.search(r"- \[ \] ", file_content):
+                    return (
+                        "[update_project_todo: There are still incomplete steps marked as [ ]. "
+                        "Please mark all steps using operation='update_step' "
+                        "before calling operation='complete_task'.]"
+                    )
+
             if not result or not result.strip():
                 return (
                     "[update_project_todo error: result is required for complete_task. "
