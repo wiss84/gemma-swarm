@@ -941,22 +941,31 @@ def register_coding_handlers(app, run_coding_fn=None):
         if not project_name:
             return
 
-        # Look up workspace_root from the coding registry
+        # Look up the existing project entry from the coding registry
         registry = _load_coding_registry()
-        workspace_root = None
-        for entry in registry.values():
-            if entry.get("project_name") == project_name:
-                workspace_root = entry.get("workspace_root")
-                break
+        entry = None
+        # Try to find by thread_ts first (thread already has a coding workspace)
+        if thread_ts in registry:
+            entry = registry[thread_ts]
+        else:
+            # Fall back to finding by project_name across all entries
+            for e in registry.values():
+                if e.get("project_name") == project_name:
+                    entry = e
+                    break
 
-        # Fallback: reconstruct from CODING_WORKSPACE_ROOT
-        if not workspace_root:
+        if entry:
+            workspace_root = entry.get("workspace_root", "")
+            project_dir    = entry.get("project_dir", workspace_root)
+        else:
+            # No existing entry — fresh creation
             workspace_root = str(CODING_WORKSPACE_ROOT / _safe_name(project_name))
+            project_dir    = workspace_root
 
         _save_coding_registry_entry(
             thread_ts=thread_ts,
             workspace_root=workspace_root,
-            project_dir=str(Path(workspace_root) / _safe_name(project_name)),
+            project_dir=project_dir,
             project_name=project_name,
             channel_id=channel,
         )

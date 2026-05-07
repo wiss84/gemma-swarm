@@ -35,8 +35,8 @@ from tools.coding_tools import (
     read_files,
     write_files,
     edit_files,
-    glob_search,
-    grep_search,
+    # glob_search,
+    # grep_search,
     execute_shell,
     set_coding_workspace_root,
 )
@@ -63,10 +63,10 @@ from tools.validation_tools_universal import (
 
 # ── Layer 5: Git tools ─────────────────────────────────────────────────────────────
 from tools.git_tools import (
-    git_status,
-    git_diff,
+    # git_status,
+    # git_diff,
     git_commit,
-    git_restore_file,
+    # git_restore_file,
 )
 
 # ── Layer 6: Environment tools ─────────────────────────────────────────────────
@@ -141,7 +141,7 @@ class CodingAgent(BaseAgent):
         tools = [
             # Layer 1
             read_files, write_files, edit_files,
-            glob_search, grep_search, execute_shell,
+            execute_shell,
             # Layer 2
             get_installed_package_info, get_package_latest_version,
             fetch_package_docs, search_web, fetch_page, fetch_next_chunk,
@@ -151,7 +151,7 @@ class CodingAgent(BaseAgent):
             # Layer 4
             validate_files,
             # Layer 5: Git tools
-            git_status, git_diff, git_commit, git_restore_file,
+            git_commit,
             # Layer 6
             get_python_info, get_env_variables, install_package,
             # Layer 7 — semantic code intelligence

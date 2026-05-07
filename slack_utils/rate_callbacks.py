@@ -10,13 +10,7 @@ import time
 import logging
 import threading
 
-from agents.task_classifier_agent import get_task_classifier_agent
-from agents.planner_agent          import get_planner_agent
 from agents.supervisor_agent       import get_supervisor_agent
-from agents.researcher_agent       import get_researcher_agent
-from agents.deep_researcher_agent  import get_deep_researcher_agent
-from agents.email_composer_agent   import get_email_composer_agent
-from agents.linkedin_composer_agent import get_linkedin_composer_agent
 from agents.memory_agent           import get_memory_agent
 
 logger = logging.getLogger(__name__)
@@ -24,13 +18,7 @@ logger = logging.getLogger(__name__)
 
 def _all_agents():
     return [
-        get_task_classifier_agent(),
-        get_planner_agent(),
         get_supervisor_agent(),
-        get_researcher_agent(),
-        get_deep_researcher_agent(),
-        get_email_composer_agent(),
-        get_linkedin_composer_agent(),
         get_memory_agent(),
     ]
 

@@ -29,6 +29,7 @@ import re
 import logging
 from agents_utils.state import AgentState
 from agents_utils.config import LABEL
+from langchain_core.messages import HumanMessage, AIMessage
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +54,8 @@ _MD_TABLE_RE = re.compile(
 # ── Label stripping ───────────────────────────────────────────────────────────
 
 def _strip_labels(text: str) -> str:
-    """Remove all internal agent labels from text before sending to user."""
-    for label in LABEL.values():
-        text = text.replace(label, "").strip()
-    return text
+    """No-op: labels are no longer added to messages in the redesigned supervisor."""
+    return text.strip()
 
 
 # ── LaTeX arrow conversion ────────────────────────────────────────────────────
@@ -506,42 +505,19 @@ def _build_formatted_output(slack_text: str, table_block: dict | None) -> list:
 # ── State helpers ─────────────────────────────────────────────────────────────
 
 def _get_final_response(state: AgentState) -> str:
-    """
-    Extract the final response to send to the user.
-
-    Looks for the most recent supervisor message with a non-empty response.
-    Falls back to system messages, then error_message, then a safe default.
-    """
-    from langchain_core.messages import HumanMessage
-
+    """Extract the supervisor's final response from the last AIMessage."""
     messages = state.get("messages", [])
 
     for msg in reversed(messages):
-        if not isinstance(msg, HumanMessage):
+        if not isinstance(msg, AIMessage):
             continue
-
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
-
-        if content.startswith(LABEL["supervisor"]):
-            text = content.replace(LABEL["supervisor"], "").strip()
-            if text:
-                return text
-            logger.warning(
-                "[output_formatter] Supervisor produced an empty response. "
-                "This usually means MODE A was used for a task that needed MODE B "
-                "(e.g. creative writing placed in current_subtask instead of response)."
-            )
-            break
-
-        if content.startswith(LABEL["system"]):
-            text = content.replace(LABEL["system"], "").strip()
-            if text:
-                return text
+        if content.strip():
+            return content.strip()
 
     error = state.get("error_message", "")
     if error:
         return f"An error occurred: {error}"
-
     return "I wasn't able to generate a response. Please try again."
 
 
@@ -553,12 +529,25 @@ def output_formatter_node(state: AgentState) -> dict:
     formatted_output is list[str | dict]:
       str  → post as text=..., mrkdwn=True
       dict → post as blocks=[...] (Slack Block Kit table block)
+
+    If formatted_output is already set in state (e.g. CONFIG_MISSING short-circuit),
+    it is used as-is without calling _get_final_response.
     """
+    existing_output = state.get("formatted_output", [])
+    if existing_output:
+        logger.info(
+            f"[output_formatter] Using pre-set formatted_output: {len(existing_output)} item(s)"
+        )
+        return {
+            "formatted_output": existing_output,
+            "task_complete":    True,
+            "next_node":        "end",
+        }
+
     raw_response = _get_final_response(state)
     clean        = _strip_labels(raw_response)
 
     slack_text, table_block = _markdown_to_slack(clean)
-    
     formatted_output        = _build_formatted_output(slack_text, table_block)
 
     logger.info(

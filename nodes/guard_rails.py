@@ -15,7 +15,7 @@ import logging
 import re
 from langchain_core.messages import HumanMessage
 from agents_utils.state import AgentState
-from agents_utils.config import LABEL, BLOCKED_PATTERNS
+from agents_utils.config import BLOCKED_PATTERNS
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +63,13 @@ def guard_rails_node(state: AgentState) -> dict:
     """
     messages = state.get("messages", [])
 
-    # Get latest human message
+    # Get latest human message (no label prefix in new design)
     latest_human = ""
     for msg in reversed(messages):
         if isinstance(msg, HumanMessage):
             content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            if not any(content.startswith(label) for label in LABEL.values()):
-                latest_human = content.strip()
-                break
+            latest_human = content.strip()
+            break
 
     if not latest_human:
         return {"next_node": "supervisor"}
@@ -78,34 +77,19 @@ def guard_rails_node(state: AgentState) -> dict:
     # Check for blocked patterns
     blocked = _check_blocked(latest_human)
     if blocked:
-        logger.warning(f"[guard_rails] Blocked pattern detected: {blocked}")
+        logger.warning(f"[guard_rails] Blocked pattern: {blocked}")
         return {
             "next_node":     "output_formatter",
             "task_complete": True,
-            "messages": messages + [
-                HumanMessage(
-                    content=f"{LABEL['system']}\n"
-                            f"This request was blocked by guard rails.\n"
-                            f"Reason: Contains potentially dangerous pattern: '{blocked}'\n"
-                            f"Please rephrase your request."
-                )
-            ],
+            "formatted_output": [f"This request was blocked.\nReason: Contains potentially dangerous pattern: '{blocked}'\nPlease rephrase your request."],
         }
 
-    # Check for prompt injection
     if _check_injection(latest_human):
-        logger.warning(f"[guard_rails] Prompt injection attempt detected.")
+        logger.warning("[guard_rails] Prompt injection detected.")
         return {
             "next_node":     "output_formatter",
             "task_complete": True,
-            "messages": messages + [
-                HumanMessage(
-                    content=f"{LABEL['system']}\n"
-                            f"This request was blocked by guard rails.\n"
-                            f"Reason: Potential prompt injection detected.\n"
-                            f"Please rephrase your request."
-                )
-            ],
+            "formatted_output": ["This request was blocked.\nReason: Potential prompt injection detected.\nPlease rephrase your request."],
         }
 
     logger.info("[guard_rails] Input passed all checks.")

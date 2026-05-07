@@ -3,6 +3,13 @@ Gemma Swarm — Agent State
 ===========================
 The shared state that flows through the entire LangGraph pipeline.
 Every agent and every deterministic node reads from and writes to this state.
+
+Redesign notes (supervisor redesign):
+  - Removed all per-agent history fields (researcher_history, email_history, etc.)
+  - Removed all routing flag fields (requires_research, requires_email, etc.)
+  - Removed planning fields (is_complex_task, task_plan, current_subtask, etc.)
+  - Added loaded_tools: list — dynamic toolset loaded by load_toolset meta-tool
+  - Supervisor now routes via next_node only; no routing flags needed.
 """
 
 from typing import TypedDict
@@ -15,12 +22,9 @@ class AgentState(TypedDict):
     messages: list[BaseMessage]
 
     # ── Task Tracking ──────────────────────────────────────────────────────────
-    original_task:   str
-    current_subtask: str
-    current_subtask_id: int | None
-    subtask_results: dict
-    active_agent:    str
-    task_complete:   bool
+    original_task: str
+    active_agent:  str
+    task_complete: bool
 
     # ── Retry / Error Handling ─────────────────────────────────────────────────
     retry_counts:  dict
@@ -38,43 +42,21 @@ class AgentState(TypedDict):
     files_modified: list[str]
 
     # ── Memory ─────────────────────────────────────────────────────────────────
-    context_summary:                     str    # supervisor conversation summary
-    researcher_history:                  list   # researcher's own conversation history
-    deep_researcher_history:             list   # deep researcher's own conversation history
-    email_history:                       list   # email composer's own conversation history
-    linkedin_history:                    list   # linkedin composer's own conversation history
-    gmail_history:                       list   # gmail agent's own conversation history
-    calendar_history:                    list   # calendar agent's own conversation history
-    docs_history:                        list   # docs agent's own conversation history
-    sheets_history:                      list   # sheets agent's own conversation history
-    researcher_context_summary:          str
-    deep_researcher_context_summary:     str
-    email_context_summary:               str
-    linkedin_context_summary:            str
-    gmail_context_summary:               str
-    calendar_context_summary:            str
-    docs_context_summary:                str
-    sheets_context_summary:              str
+    context_summary: str   # supervisor-level context compression by memory agent
 
-    # ── Planning ───────────────────────────────────────────────────────────────
-    is_complex_task:   bool        # Set by task_classifier
-    task_plan:         list[dict]  # Set by planner — list of subtasks
-    # Each subtask: {"id": 1, "description": "...", "agent": "researcher", "status": "pending|done|failed"}
+    # ── Dynamic Toolset Loading ────────────────────────────────────────────────
+    # Set by the load_toolset meta-tool inside the supervisor agentic loop.
+    # Contains the name of the currently loaded toolset (e.g. "gmail").
+    # Cleared at the start of each new turn.
+    loaded_toolset: str    # name of the toolset currently loaded, "" if none
 
     # ── Routing ────────────────────────────────────────────────────────────────
-    next_node:              str
-    requires_research:      bool  # Route to researcher (search_web only)
-    requires_deep_research: bool  # Route to deep_researcher (search + fetch)
-    requires_email:         bool
-    requires_linkedin:     bool  # Route to email_composer
-    require_gmail:         bool
-    requires_calendar:     bool
-    requires_docs:         bool
-    requires_sheets:       bool
-    requires_confirmation:  bool  # Human must approve before continuing
+    next_node: str         # Supervisor signals its desired next node here.
+                           # Only used by confirm nodes and validator.
+                           # All routing is via next_node — no routing flags.
 
-    # ── Interrupt Handling ───────────────────────────────────────────────────────
-    is_interrupted:     bool  # True when user sends message while agent is running
+    # ── Interrupt Handling ────────────────────────────────────────────────────
+    is_interrupted: bool   # True when user sends message while agent is running
 
     # ── Email ──────────────────────────────────────────────────────────────────
     email_draft: dict
@@ -85,28 +67,28 @@ class AgentState(TypedDict):
     #   "message":     "...",
     #   "language":    "english",
     #   "layout":      "official",
-    #   "attachments": [],   # file paths relative to workspace/email_attachments/
-    #   "feedback":    "",   # populated on reject → recompose cycle
+    #   "rendered_body": "...",
+    #   "attachments": [],
+    #   "feedback":    "",
     # }
 
-    # ── LinkedIn ────────────────────────────────────────────────────────────────
+    # ── LinkedIn ───────────────────────────────────────────────────────────────
     linkedin_draft: dict
     # Structure:
     # {
     #   "post_text":      "...",
-    #   "media_filename": "...",  # filename in linkedin_media/post_attachments/
-    #   "media_path":     "...",  # resolved full path
+    #   "media_filename": "...",
+    #   "media_path":     "...",
     #   "language":       "english",
-    #   "feedback":       "",     # populated on reject → recompose cycle
+    #   "feedback":       "",
     # }
 
     # ── Google ─────────────────────────────────────────────────────────────────
     google_requires_confirmation: bool
     # True after write actions (calendar_create, calendar_delete,
     # docs_create, docs_update, sheets_create, sheets_update).
-    # False after read actions — routes straight back to supervisor.
-    # Note: _slack_client is injected at runtime by graph.py node wrappers
-    # and is NOT persisted in state (not serialisable).
+    # Note: _slack_client is injected at runtime by graph.py and
+    # is NOT persisted in state (not serialisable).
 
     # ── Output ─────────────────────────────────────────────────────────────────
     formatted_output: list[str]
@@ -126,9 +108,6 @@ def default_state(
     return AgentState(
         messages=[],
         original_task=original_task,
-        current_subtask="",
-        current_subtask_id=None,
-        subtask_results={},
         active_agent="",
         task_complete=False,
         retry_counts={},
@@ -141,30 +120,8 @@ def default_state(
         files_created=[],
         files_modified=[],
         context_summary="",
-        researcher_history=[],
-        deep_researcher_history=[],
-        email_history=[],
-        linkedin_history=[],
-        gmail_history=[],
-        calendar_history=[],
-        docs_history=[],
-        sheets_history=[],
-        researcher_context_summary="",
-        deep_researcher_context_summary="",
-        email_context_summary="",
-        linkedin_context_summary="",
+        loaded_toolset="",
         next_node="",
-        is_complex_task=False,
-        task_plan=[],
-        requires_research=False,
-        requires_deep_research=False,
-        requires_email=False,
-        requires_linkedin=False,
-        requires_gmail=False,
-        requires_calendar=False,
-        requires_docs=False,
-        requires_sheets=False,
-        requires_confirmation=False,
         is_interrupted=False,
         email_draft={},
         linkedin_draft={},

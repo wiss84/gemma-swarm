@@ -35,3 +35,7 @@ def register_confirm_handlers(app):
             client.chat_delete(channel=channel, ts=body["message"]["ts"])
         except Exception:
             pass
+
+    @app.action("open_setup_doc")
+    def handle_open_setup_doc(ack, body):
+        ack()

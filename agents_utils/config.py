@@ -56,22 +56,12 @@ EMAIL_LAYOUTS_DIR = PROJECT_ROOT / "email_layouts"
 
 MODELS = {
     # ── Main graph agents ──────────────────────────────────────────────────────
-    "supervisor":        "gemma-4-31b-it",   # orchestration, routing decisions
-    "planner":           "gemma-4-31b-it",   # multi-step task decomposition
-    "researcher":        "gemma-4-31b-it",   # web search synthesis
-    "deep_researcher":   "gemma-4-26b-a4b-it", # URL fetch + summarise
-    "email_composer":    "gemma-4-26b-a4b-it", # structured email JSON output
-    "linkedin_composer": "gemma-4-26b-a4b-it", # structured post JSON output
-    "task_classifier":   "gemma-4-31b-it",   # simple/complex classification
-    "memory":            "gemma-4-31b-it",   # context compression
-    "validator":         "gemma-4-26b-a4b-it", # pass/fail JSON validation
-    "gmail_agent":       "gemma-4-26b-a4b-it", # structured Gmail JSON output
-    "calendar_agent":    "gemma-4-26b-a4b-it", # structured Calendar JSON output
-    "docs_agent":        "gemma-4-26b-a4b-it", # structured Docs JSON output
-    "sheets_agent":      "gemma-4-26b-a4b-it", # structured Sheets JSON output
+    "supervisor":  "gemma-4-31b-it",    # orchestration + direct tool calling
+    "memory":      "gemma-4-31b-it",    # context compression
+    "validator":   "gemma-4-26b-a4b-it", # pass/fail JSON validation
     # ── Coding Agent ──────────────────────────────────────────────────────────
-    "coding_agent":      "gemma-4-31b-it",
-    "coding_subagent":   "gemma-4-26b-a4b-it",
+    "coding_agent":    "gemma-4-31b-it",
+    "coding_subagent": "gemma-4-26b-a4b-it",
 }
 
 # ── Model Context Windows ──────────────────────────────────────────────────────
@@ -84,21 +74,12 @@ MODEL_CONTEXT_WINDOWS = {
 # ── Retry Limits Per Agent ─────────────────────────────────────────────────────
 
 MAX_RETRIES = {
-    "supervisor":        5,
-    "planner":           3,
-    "researcher":        2,
-    "deep_researcher":   2,
-    "email_composer":    5,
-    "linkedin_composer": 5,
-    "task_classifier":   3,
-    "memory":            5,
-    "gmail_agent":       3,
-    "calendar_agent":    3,
-    "docs_agent":        3,
-    "sheets_agent":      3,
+    "supervisor":  5,
+    "memory":      5,
+    "validator":   3,
     # ── Coding Agent ──────────────────────────────────────────────────────────
-    "coding_agent":      5,
-    "coding_subagent":   3,
+    "coding_agent":    5,
+    "coding_subagent": 3,
 }
 
 MAX_RETRIES_SERVICE_UNAVAILABLE = {
@@ -142,35 +123,21 @@ INTERRUPT_BUTTON_TIMEOUT    = 300
 # ── Message Labels ─────────────────────────────────────────────────────────────
 
 LABEL = {
-    "human":                 "[HUMAN]",
-    "supervisor":            "[SUPERVISOR]",
-    "planner":               "[PLANNER]",
-    "researcher":            "[RESEARCHER RESULT]",
-    "deep_researcher":       "[DEEP RESEARCHER RESULT]",
-    "email_composer":        "[EMAIL COMPOSER RESULT]",
-    "linkedin_composer":     "[LINKEDIN COMPOSER RESULT]",
-    "gmail_agent":           "[GMAIL AGENT RESULT]",
-    "calendar_agent":        "[CALENDAR AGENT RESULT]",
-    "docs_agent":            "[DOCS AGENT RESULT]",
-    "sheets_agent":          "[SHEETS AGENT RESULT]",
-    "memory":                "[MEMORY]",
-    "system":                "[SYSTEM]",
-    "confirmation":          "[AWAITING YOUR CONFIRMATION]",
-    "tool_result":           "[TOOL RESULT]",
+    "human":        "[HUMAN]",
+    "supervisor":   "[SUPERVISOR]",
+    "memory":       "[MEMORY]",
+    "system":       "[SYSTEM]",
+    "confirmation": "[AWAITING YOUR CONFIRMATION]",
+    "tool_result":  "[TOOL RESULT]",
     # ── Coding Agent ──────────────────────────────────────────────────────────
-    "coding_agent":          "[CODING AGENT]",
-    "coding_subagent":       "[CODING SUBAGENT]",
+    "coding_agent":    "[CODING AGENT]",
+    "coding_subagent": "[CODING SUBAGENT]",
 }
 
 # ── Guard Rails — Blocked Patterns ────────────────────────────────────────────
 
-AGENT_GUARDS = {
-    "human_gate":       "requires_confirmation",
-    "researcher":       "requires_research",
-    "deep_researcher":  "requires_deep_research",
-    "email_composer":   "requires_email",
-    "linkedin_composer": "requires_linkedin",
-}
+# AGENT_GUARDS removed — supervisor now signals routing via next_node directly,
+# not via routing flags. Kept for reference in git history.
 
 BLOCKED_PATTERNS = [
 

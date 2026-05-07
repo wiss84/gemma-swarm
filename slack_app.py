@@ -22,9 +22,9 @@ from langchain_core.messages import HumanMessage
 load_dotenv()
 
 from agents_utils.graph import set_slack_client, get_graph
+from agents.supervisor_agent import set_tool_status_callback, clear_tool_status_callback
 from agents_utils.state import default_state
 from agents_utils.config import (
-    LABEL,
     LANGGRAPH_RECURSION_LIMIT,
 )
 
@@ -80,7 +80,8 @@ def _strip_slack_formatting(text: str) -> str:
 def _run_agent(message: str, thread_ts: str, channel: str, client, say):
     """
     Core worker. Runs in a background thread.
-    Streams graph, posts status updates, posts final response chunks.
+    Posts a single tool-status message that updates per tool call.
+    Posts the final response when done.
     """
     state        = get_thread_state(thread_ts)
     state.active = True
@@ -88,20 +89,31 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say):
     set_slack_client(client, lambda ts: ts)
     register_wait_callbacks(client, channel, thread_ts)
 
-
     compiled_graph = get_graph()
-    # Use langgraph_thread_ts if set (resuming old project from new Slack thread)
-    # Otherwise fall back to active_thread_id (normal flow)
     langgraph_thread = getattr(state, "langgraph_thread_ts", "") or state.active_thread_id
     config = {
         "configurable": {"thread_id": langgraph_thread},
         "recursion_limit": LANGGRAPH_RECURSION_LIMIT,
     }
 
-    # Snapshot status_ts locally so the finally block always cleans up its OWN
-    # status message, even if a fresh-start overwrites state.status_ts first.
-    local_status_ts = post_status(client, channel, thread_ts, STATUS_MESSAGES["supervisor"]) or ""
-    state.status_ts = local_status_ts
+    # Single tool-status message, updated per tool call (like coding agent)
+    _tool_status_ts: dict = {"ts": None}
+
+    def tool_status_fn(tool_name: str):
+        if tool_name == "thinking":
+            text = "🧠 Thinking..."
+        else:
+            text = f"🔧 Using: `{tool_name}`"
+        try:
+            if _tool_status_ts["ts"]:
+                update_status(client, channel, _tool_status_ts["ts"], text)
+            else:
+                ts = post_status(client, channel, thread_ts, text)
+                _tool_status_ts["ts"] = ts
+        except Exception as e:
+            logger.debug(f"[slack] Tool status update failed: {e}")
+
+    set_tool_status_callback(tool_status_fn)
 
     formatted_output = []
 
@@ -169,21 +181,16 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say):
                     state.interrupt_message = ""
             
             for node_name, node_output in chunk.items():
-                status_text = STATUS_MESSAGES.get(node_name)
-                if status_text and local_status_ts:
-                    update_status(client, channel, local_status_ts, status_text)
-
                 if node_name == "output_formatter":
                     formatted_output = node_output.get("formatted_output", [])
-
-                # logger.info(f"[slack] Node: {node_name}")
 
     except Exception as e:
         logger.error(f"[slack] Agent error: {e}")
         formatted_output = [f"❌ An error occurred: {e}"]
 
     finally:
-        delete_status(client, channel, local_status_ts)
+        delete_status(client, channel, _tool_status_ts["ts"] or "")
+        clear_tool_status_callback()
         clear_wait_callbacks()
         state.status_ts = ""
         state.active    = False
@@ -197,33 +204,23 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say):
 
             for item in formatted_output:
                 if isinstance(item, dict):
-                    # Table block — send as its own message with a plain fallback.
-                    # Do NOT use pending_text as the text= field: Slack only shows
-                    # text= as notification fallback when blocks= is present, so
-                    # the preceding text chunk must be posted as a separate message.
+                    # Block Kit block (table, section, etc.)
+                    # Flush any pending text first as a separate message
                     if pending_text is not None:
-                        logger.info(f"[slack] Posting intro: {len(pending_text)} chars")
                         try:
-                            client.chat_postMessage(
-                                channel=channel,
-                                thread_ts=thread_ts,
-                                text=pending_text,
-                                mrkdwn=True,
-                            )
+                            client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                                    text=pending_text, mrkdwn=True)
                         except Exception as e:
                             logger.error(f"[slack] Could not post chunk: {e}")
                         pending_text = None
-                    logger.info(f"[slack] Posting table block")
+                    block_type   = item.get("type", "block")
+                    text_fallback = item.get("text", {}).get("text", "")[:500].strip() or "See attached content."
+                    logger.info(f"[slack] Posting {block_type} block")
                     try:
-                        client.chat_postMessage(
-                            channel=channel,
-                            thread_ts=thread_ts,
-                            text="Table:",
-                            blocks=[item],
-                            mrkdwn=True,
-                        )
+                        client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                                text=text_fallback, blocks=[item], mrkdwn=True)
                     except Exception as e:
-                        logger.error(f"[slack] Could not post table block: {e}")
+                        logger.error(f"[slack] Could not post block: {e}")
                 else:
                     # Text chunk — hold it; it may be followed by a table block
                     if pending_text is not None:
@@ -371,13 +368,12 @@ def _build_input_state(message, state, slack_thread_ts, slack_channel, compiled_
 
     if existing_msgs:
         return {
-            "messages": existing_msgs + [
-                HumanMessage(content=f"{LABEL['human']}\n{message}")
-            ],
+            "messages": existing_msgs + [HumanMessage(content=message)],
             "slack_thread_ts":  slack_thread_ts,
             "slack_channel":    slack_channel,
             "task_complete":    False,
             "formatted_output": [],
+            "loaded_toolset":   "",
         }
     else:
         s = default_state(
@@ -387,7 +383,7 @@ def _build_input_state(message, state, slack_thread_ts, slack_channel, compiled_
             slack_thread_ts=slack_thread_ts,
             slack_channel=slack_channel,
         )
-        s["messages"] = [HumanMessage(content=f"{LABEL['human']}\n{message}")]
+        s["messages"] = [HumanMessage(content=message)]
         return s
 
 

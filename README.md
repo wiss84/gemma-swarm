@@ -34,12 +34,12 @@ Built on **Google's Gemma 4 models** (free tier) and powered by completely free 
 🛡️ **Interrupt & adjust** → Send a new message while the bot is working and choose to combine, restart, or queue  
 💻 **Write code** → Build applications, fix bugs, refactor, test — full IDE in Slack with autonomous coding agent
 
-All with human-in-the-loop approvals before sensitive actions (email sends, LinkedIn posts, destructive file operations).
+All with human-in-the-loop approvals before sensitive actions (email sends, LinkedIn posts, Google write operations).
 
 ---
 
-## Not Home? 
-No worries, We got you. Download slack app on your phone and stay in Control from anywhere.
+## Not Home?
+No worries, We got you. Download the Slack app on your phone and stay in control from anywhere.
 
 ---
 
@@ -49,11 +49,11 @@ No worries, We got you. Download slack app on your phone and stay in Control fro
 📍 **Runs Locally** — Your data stays in your workspace (uses SQLite for memory)  
 🔐 **Privacy-First** — Open source, your workspace, your control  
 🎯 **No More Context-Switching** — Everything happens in Slack  
-⚡ **Straightforward Setup** — Get all API keys and run (30 mins first time)  
+⚡ **Straightforward Setup** — Core features work with just Slack + a Google API key. Add integrations when you need them  
 🧠 **Persistent Memory** — Conversations survive restarts and scale gracefully  
-📚 **Multi-Model Support** — Specialized agents pick the right model for each task  
+🔧 **Dynamic Tool Loading** — Supervisor loads only the tools it needs per turn — zero wasted context  
 💻 **Full Coding Workspace** — Autonomous coding with git, file editing, validation, and agent learning  
-🖥️ **Context Monitor** — Desktop widget shows accumulated context window usage (conversation history + system prompt + tool schemas) as percentage of model limit, updating after each turn
+🖥️ **Context Monitor** — Desktop widget shows accumulated context window usage as percentage of model limit, updating after each turn
 
 ---
 
@@ -61,20 +61,28 @@ No worries, We got you. Download slack app on your phone and stay in Control fro
 
 ### 1. Download
 ```bash
-# Clone the repo
 git clone https://github.com/yourusername/gemma-swarm.git
 ```
 
-### 2. Get Free API Keys (30-40 minutes 1 time setup)
+### 2. Get API Keys
 
-| Service | Required | Setup Guide |
-|---------|----------|-------------|
-| Google Gemma API | ✅ Yes | [Get API Key](https://aistudio.google.com/u/0/api-keys) |
-| Jina AI (web search) | ✅ Yes | [Get API Key](https://jina.ai/) — no signup required |
-| Slack | ✅ Yes | [Slack Workflow Setup](SLACK_WORKFLOW_SETUP.md) |
-| Gmail (email sending) | ✅ Yes | [Email Workflow Setup](Email_WORKFLOW_SETUP.md) |
-| LinkedIn (posting) | ✅ Yes | [LinkedIn Workflow Setup](LINKEDIN_WORKFLOW_SETUP.md) |
-| Google Workspace | ✅ Yes | [Google Workflow Setup](Google_WORKFLOW_SETUP.md) |
+**Required for all features:**
+
+| Service | Setup Guide |
+|---------|-------------|
+| Google Gemma API | [Get API Key](https://aistudio.google.com/u/0/api-keys) |
+| Jina AI (web search) | [Get API Key](https://jina.ai/) — no signup required |
+| Slack | [Slack Setup](docs/setup/slack_setup.md) |
+
+**Optional integrations** — add when you need them, skip what you don't:
+
+| Integration | Setup Guide |
+|-------------|-------------|
+| Gmail & Google Workspace | [Google Setup](docs/setup/google_setup.md) |
+| Email sending (SMTP) | [Email Setup](docs/setup/email_setup.md) |
+| LinkedIn posting | [LinkedIn Setup](docs/setup/linkedin_setup.md) |
+
+> If an integration isn't configured, Gemma Swarm shows a setup guide button in Slack instead of crashing. You can add integrations at any time, restart the terminal and continue the same conversation.
 
 ### 3. Environment Variables
 
@@ -91,16 +99,16 @@ JINA_API_KEY=your_jina_api_key
 Bot_User_OAuth_Token=xoxb-your-bot-token
 agent_socket_token=xapp-your-socket-token
 
-# Gmail — email sending (required)
+# Gmail — email sending (optional)
 HUMAN_EMAIL=your_email@gmail.com
-EMAIL_PASSWORD=your_gmail_app_password
+EMAIL_PASS=your_gmail_app_password
 
-# LinkedIn — posting (required)
+# LinkedIn — posting (optional)
 LINKEDIN_CLIENT_ID=your_linkedin_client_id
 LINKEDIN_CLIENT_SECRET=your_linkedin_client_secret
 
-# Google Workspace — OAuth credentials (required)
-# Place Google_creds.json in project root (see Google_WORKFLOW_SETUP.md)
+# Google Workspace — OAuth credentials (optional)
+# Place Google_creds.json in project root (see docs/setup/google_setup.md)
 
 # LangSmith — tracing (optional, for debugging)
 LANGCHAIN_TRACING_V2=true
@@ -141,20 +149,15 @@ source gemma_swarm/bin/activate  # Windows: gemma_swarm\Scripts\activate
 pip install -r requirements.txt
 
 # Create separate environment for coding agent tool execution
-# All shell commands, validation, and Python tool calls run in gemma_test
 python -m venv gemma_test
 source gemma_test/bin/activate  # Windows: gemma_test\Scripts\activate
-
-# Install coding agent dependencies (pytest, ruff, flake8, mypy, magika)
 pip install pytest ruff flake8 mypy magika
-
-# Deactivate gemma_test and return to main environment
 deactivate
 
 # Install Node.js LTS (for JavaScript/TypeScript validation)
 #   macOS: brew install node
-#   Linux (Debian/Ubuntu): curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs
-#   Windows: Download from nodejs.org or use winget: winget install OpenJS.NodeJS.LTS
+#   Linux: curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs
+#   Windows: winget install OpenJS.NodeJS.LTS
 
 # Install TypeScript and ESLint globally
 npm install -g typescript eslint
@@ -162,14 +165,14 @@ npm install -g typescript eslint
 # Install ts-morph bridge for semantic JS/TS analysis
 cd tools/ts_analysis_bridge && npm install --prefer-offline && cd ../..
 
-# Run the app (from gemma_swarm environment)
+# Activate main env and run
 source gemma_swarm/bin/activate  # Windows: gemma_swarm\Scripts\activate
 python slack_app.py
 ```
 
-**Important:** 
+**Important:**
 - The `gemma_swarm` environment is the **main app** — must be activated to run `slack_app.py`
-- The `gemma_test` environment is **required** — all coding agent Python tools (validation, testing, package queries, installs) execute there. Both environments must exist for the coding agent to function.
+- The `gemma_test` environment is **required** for the coding agent — both environments must exist
 
 **→ Done. Start chatting.**
 
@@ -177,20 +180,16 @@ python slack_app.py
 
 ## Completely Free
 
-Every component was deliberately chosen to avoid costs:
-
 | Component | Free Tier |
 |-----------|-----------|
 | **Gemma 4 models** | Google Gemini API free tier |
-| **Web research** | Free web fetch fallback → Jina AI — free with API key |
+| **Web research** | Jina AI — free with API key |
 | **Email** | Gmail SMTP — free with App Password |
 | **LinkedIn** | LinkedIn API — free with developer app |
 | **Google Workspace** | Gmail, Calendar, Docs, Sheets APIs — free with OAuth |
 | **Slack** | Slack Bolt — free for personal workspaces |
 | **Memory** | SQLite — local file, no cloud costs |
 | **Coding** | Local workspace + git — no cloud IDE fees |
-
-No token counter watching your budget. Just use it.
 
 ---
 
@@ -210,73 +209,78 @@ Configure via the **Autonomous Settings** button in the Slack workspace menu.
 
 ## Full Feature List
 
-### Core Capabilities
-
-- 🤖 **Multi-Agent Orchestration** — Supervisor, Planner, Researcher, Deep Researcher, Email Composer, LinkedIn Composer, Memory Agent, Task Classifier, **Coding Agent**
+- 🔧 **Agentic Tool Calling** — Supervisor dynamically loads only the tools it needs per turn. No routing hops, no wasted context.
 - 💻 **Autonomous Coding** — Write, edit, validate, test, and commit code with full workspace management
-- 📧 **Gmail Integration** — read, search, and manage your Gmail inbox
-- 📅 **Google Calendar** — create, read, and manage calendar events
-- 📄 **Google Docs** — create and edit documents
-- 📊 **Google Sheets** — create and manage spreadsheets
-- 💬 **Slack-Native** — full human-in-the-loop confirmations, interrupt handling, file uploads, and real-time status updates
-- 📧 **Email Automation** — compose, review, and send emails via Gmail SMTP with attachment support
-- 💼 **LinkedIn Posting** — create and publish posts with image, video, and document (PDF/PPTX) attachments
-- 🔍 **Web Research** — quick search and deep research modes with full page reading
-- 🧠 **Persistent Memory** — conversation history survives restarts via SQLite checkpointing
-- 📋 **Multi-Task Planning** — automatically detects complex requests and breaks them into ordered subtasks
-- ⚡ **Interrupt Handling** — send a new message while the bot is working and choose to combine, fresh start, or queue
-- 🗜️ **Context Compression** — automatic rolling summarization when context approaches the model's limit
-- 🛡️ **Guard Rails** — safety checks blocking dangerous operations before they reach any agent
-- 📁 **Workspace Management** — each project gets its own folder for research, drafts, and attachments
-- ⚙️ **User Preferences** — personalize the bot's name, tone, and communication style
-- 🖥️ **Context Monitor UI** — desktop widget shows accumulated context window usage (tokens consumed vs model limit), model, and project per session
-- 📝 **Agent Learning Notes** — coding agent records insights across sessions to improve over time
-- 🔀 **Git Integration** — automatic repo init, commits, and history tracking for coding projects
-- 🎯 **Configurable Coding Settings** — human gate bypass, max iterations, model override per project
+- 📧 **Gmail Integration** — Read, search, and manage your Gmail inbox
+- 📅 **Google Calendar** — Create, read, and manage calendar events
+- 📄 **Google Docs** — Create and edit documents
+- 📊 **Google Sheets** — Create and manage spreadsheets
+- 💬 **Slack-Native** — Full human-in-the-loop confirmations, interrupt handling, file uploads, and real-time status updates
+- 📧 **Email Automation** — Compose, review, and send emails via Gmail SMTP with attachment support
+- 💼 **LinkedIn Posting** — Create and publish posts with image, video, and document attachments
+- 🔍 **Web Research** — Quick search and deep page reading modes
+- 🧠 **Persistent Memory** — Conversation history survives restarts via SQLite checkpointing
+- ⚡ **Interrupt Handling** — Send a new message while the bot is working: combine, fresh start, or queue
+- 🗜️ **Context Compression** — Automatic rolling summarization when context approaches the model limit
+- 🛡️ **Guard Rails** — Safety checks blocking dangerous operations before they reach the agent
+- 📁 **Workspace Management** — Each project gets its own folder for research, drafts, and attachments
+- ⚙️ **User Preferences** — Personalize the bot's name, tone, and communication style
+- 🖥️ **Context Monitor UI** — Desktop widget shows accumulated context window usage, model, and project per session
+- 📝 **Agent Learning Notes** — Coding agent records insights across sessions to improve over time
+- 🔀 **Git Integration** — Automatic repo init, commits, and history tracking for coding projects
+- 🎯 **Configurable Coding Settings** — Human gate bypass, max iterations, model override per project
+- 🔌 **Optional Integrations** — Missing credentials show a clickable setup guide in Slack, never a crash
 
 ---
 
 ## Architecture
 
-### Agent Flow
+### Main Assistant Graph
 
 ```
                New Message
                     │
                     ▼
-               Input Router ──→ Memory Agent (if context > 70% threshold)
+               Input Router ──► Memory Agent (if context > 70% threshold)
                     │                    │
                     └────────────────────┘
                     ▼
                Guard Rails
                     │
                     ▼
-               Task Classifier
+               Supervisor ◄─────────────────────────────────────┐
+               (agentic loop)                                   │
+                    │                                           │
+                    │  🧠 Thinking...                           │
+                    │  🔧 load_toolset("gmail")                 │ retry
+                    │  🔧 gmail_list_messages(...)              │
+                    │  🧠 Thinking...                           │
+                    │  ── final response ──                      │
+                    │                                            │
+                    ▼                                            │
+               Validator ────────────────────────────────────────┘
                     │
-                    ├── Simple Task ──→ Supervisor
+                    ▼
+               Output Formatter
                     │
-                    └── Complex Task ──→ Planner ──→ Supervisor
-                                                       │
-                                   ┌──────────────────────┼──────────────────────┐
-                                   ▼                      ▼                      ▼
-                              Researcher          Deep Researcher          Email Composer
-                                   │                      │                LinkedIn Composer
-                                   │                      │                   Gmail Agent
-                                   │                      │                Calendar Agent
-                                   │                      │                   Docs Agent
-                                   │                      │                  Sheets Agent
-                                   └──────────────────────┘
-                                                       │                       │
-                                                       │                   Human Gate
-                                                       │            (approve / reject with feedback)
-                                                       ┌─────────        Email / LinkedIn Send
-                                                       │
-                                                  Validator
-                                                       │
-                                                  Output Formatter
-                                                       │
-                                                       END
+                   END
 ```
+
+**Blocking tools** — Email, LinkedIn, and Google write actions (create/update/delete) block inside the supervisor's tool call and handle human confirmation directly:
+
+```
+Supervisor calls send_email(...)
+      │
+      ▼
+   Tool posts draft to Slack + waits for Approve / Reject
+      │
+      ├── Approved → email sent → returns "✅ Sent" to supervisor
+      └── Rejected with feedback → returns "rejected: <feedback>" to supervisor
+                                        │
+                                        └── Supervisor rewrites and calls tool again
+```
+
+No routing hops for confirmations. The supervisor sees only a tool result string.
 
 **Separate Coding Agent Graph** (accessed via "💻 Coding Agent" button):
 
@@ -284,62 +288,67 @@ Configure via the **Autonomous Settings** button in the Slack workspace menu.
                Coding Prompt
                     │
                     ▼
-               Coding Agent (gemma-4-31b-it) ──→ spawn_subagent (gemma-4-26b-a4b-it) [optional]
-                    │                                 │
-                    ├─→ read/write/edit files   ──→   │
-                    ├─→ execute shell commands  ──→   │
-                    ├─→ git operations          ──→   │
-                    ├─→ validate & test         ──→   │
-                    ├─→ research (web/package)  ──→   │
-                    └─→ update TODO, write notes      │
-                    │                                 ▼
-                    ┌───────────────────── Subagent returns summary
+               Coding Agent (gemma-4-31b-it) ──► spawn_subagent (gemma-4-26b-a4b-it) [optional]
+                    │
+                    ├─► read/write/edit files
+                    ├─► execute shell commands
+                    ├─► git operations
+                    ├─► validate & test
+                    ├─► research (web/package)
+                    └─► update TODO, write notes
                     │
                Output Node
                     │
-               Reset Node (Experimental)
-                    │                          
+               Reset Node
                     │
                     ▼
           Final response to Slack
 ```
 
-**Key design:** A dedicated `reset_node` executes after every completed task, wiping the **in-graph conversation message history** while preserving workspace identity (project name, Slack thread, git state, session metadata). The agent's **persistent project memory lives in the workspace** — TODO notes, created files, git commits, and agent learning notes are never cleared. This means after a reset you can immediately ask "improve what you just built" and the agent will read those disk artifacts to reconstruct full context, giving you a fresh 256k window for each new task without losing project continuity.
+**Per-task context reset:** After each coding task, `reset_node` wipes the in-graph conversation history, freeing the full 256k context window for the next task. Project memory persists on disk (TODO notes, files, git history, agent notes), so you can immediately ask "improve what you just built."
 
-### Agents
+---
 
-#### Main Graph Agents
+### Agents & Models
 
-| Agent | Model | Purpose |
-|-------|-------|---------|
-| Supervisor | `gemma-4-31b-it` | Orchestrates tasks, routes to agents, synthesises results |
-| Planner | `gemma-4-31b-it` | Breaks complex requests into ordered subtasks |
-| Researcher | `gemma-4-31b-it` | Quick web search — news, facts, prices |
-| Deep Researcher | `gemma-4-26b-a4b-it` | Full page reading — documentation, technical articles, URLs |
-| Email Composer | `gemma-4-26b-a4b-it` | Writes email drafts with layout and language support |
-| LinkedIn Composer | `gemma-4-26b-a4b-it` | Writes LinkedIn post drafts with media support |
-| Gmail Agent | `gemma-4-26b-a4b-it` | Reads and searches Gmail messages |
-| Calendar Agent | `gemma-4-26b-a4b-it` | Creates and manages calendar events |
-| Docs Agent | `gemma-4-26b-a4b-it` | Creates and edits Google Docs |
-| Sheets Agent | `gemma-4-26b-a4b-it` | Creates and manages Google Sheets |
-| Task Classifier | `gemma-4-31b-it` | Determines if a request is simple or multi-step |
+#### Main Graph
+
+| Component | Model | Role |
+|-----------|-------|------|
+| Supervisor | `gemma-4-31b-it` | Single agentic loop — loads tools, calls them, produces response |
 | Memory | `gemma-4-31b-it` | Rolling context compression (only runs at threshold) |
-| Validator | `gemma-4-26b-a4b-it` | Validates supervisor response before delivery |
+| Validator | `gemma-4-26b-a4b-it` | Response quality check before delivery |
 
 #### Coding Agent
 
-| Agent | Model | Purpose |
-|-------|-------|---------|
+| Component | Model | Role |
+|-----------|-------|------|
 | Coding Agent (main) | `gemma-4-31b-it` | Orchestrates coding tasks, tool execution, subagent delegation |
 | Coding Subagent | `gemma-4-26b-a4b-it` | Handles delegated subtasks (research, write, validate) |
 
-**Per-task context reset:** After a coding task completes, the graph's `reset_node` wipes the in-graph conversation history, freeing the full 256k context window for the next independent request. The agent's **project memory persists on disk** — TODO notes, created files, git history, and agent learning notes are all preserved, so you can immediately ask "improve what you just built" and the agent will read those artifacts to reconstruct context. Triggered by `update_project_todo(operation="complete_task")` — this automatic cleanup is unique to the coding agent and prevents context bloat across multi-session workflows.
-
 **Model selection rationale:**
-- `gemma-4-31b-it` — best reasoning, 256k context, 15 RPM / 1500 RPD — used for orchestration and complex reasoning (supervisor, planner, researcher, memory, task classifier)
-- `gemma-4-26b-a4b-it` — fast MoE architecture, 256k context — used for structured/constrained tasks with JSON output (deep researcher, composers, all tool agents, coding subagent)
+- `gemma-4-31b-it` — best reasoning, 256k context, used for orchestration and complex synthesis
+- `gemma-4-26b-a4b-it` — fast MoE architecture, 256k context, used for structured/constrained tasks
 
-> **Note:** Gemma 3 / 3n models were discontinued April 30, 2026. All agents have been migrated to the Gemma 4 family.
+---
+
+### Dynamic Toolset Loading
+
+The supervisor starts each turn with a single meta-tool: `load_toolset`. When it needs a capability, it loads the toolset first, then calls the tools:
+
+| Toolset | Tools | Requires |
+|---------|-------|----------|
+| `research` | `search_web`, `fetch_page`, `fetch_next_chunk` | Always available |
+| `gmail` | `gmail_list_messages`, `gmail_read_message`, `gmail_check_for_sender` | `Google_creds.json` |
+| `calendar` | `calendar_list`, `calendar_next`, `calendar_create`*, `calendar_delete`* | `Google_creds.json` |
+| `docs` | `docs_read`, `docs_create`*, `docs_update`* | `Google_creds.json` |
+| `sheets` | `sheets_read`, `sheets_create`*, `sheets_update`* | `Google_creds.json` |
+| `email` | `send_email`* | `HUMAN_EMAIL` + `EMAIL_PASS` |
+| `linkedin` | `publish_linkedin_post`* | `LINKEDIN_CLIENT_ID` + `LINKEDIN_CLIENT_SECRET` |
+
+`*` = requires human approval before executing (handled inside the tool, transparent to the supervisor)
+
+If credentials are missing for a toolset, the supervisor receives a `CONFIG_MISSING` signal and the user sees a setup guide with a clickable button to open the relevant file in their editor.
 
 ---
 
@@ -349,28 +358,31 @@ Once the app is running, mention the bot in any Slack channel it belongs to.
 
 ### Getting Started
 
-1. **Choose your agent**: First you'll see two buttons — 🤖 **Assistant** for general tasks (research, email, calendar, docs) or 💻 **Coding Agent** for writing code
-2. **Select or create a workspace**: Pick an existing project or create a new one (coding agent can start a new project from scratch, or optionally: import from a local path or GitHub URL via the `coding settings` button)
+1. **Choose your agent**: First you'll see two buttons — 🤖 **Assistant** for general tasks or 💻 **Coding Agent** for writing code
+2. **Select or create a workspace**: Pick an existing project or create a new one
 3. **Set preferences** (first time only): Tell the bot your name and communication style
 4. **Start chatting**: Type your request and the agent will work through it step by step
 
 **Examples:**
-- Assistant: "Research quantum computing trends" or "Draft an email to the team about the project delay"
-- Coding: "Build a Flask API with user authentication" or "Fix the bug in login.py and write tests"
+- "Research quantum computing trends"
+- "Draft an email to the team about the project delay"
+- "What's on my calendar tomorrow?"
+- "Create a Google Doc with meeting notes from our last call"
+- "Post to LinkedIn about my latest project"
+- "Build a Flask API with user authentication" *(Coding Agent)*
 
 ### Advanced Features
 
-- **Interrupt flow**: Send a new message while the bot is working, choose to combine, restart, or queue
+- **Interrupt flow**: Send a new message while the bot is working — combine, restart, or queue
 - **File uploads**: Attach files (images, PDFs, documents) for the bot to process
-- **User preferences**: Click "Preferences" in the workspace menu to customize bot personality and tone
-- **Autonomous tasks**: Click "Autonomous" to configure background jobs (email watch, research, calendar)
+- **User preferences**: Click "Preferences" to customize bot personality and tone
+- **Autonomous tasks**: Click "Autonomous" to configure background jobs
 - **Coding Settings**: Configure human gate bypass, agent notes, max iterations, and model override per project
-- **Context Monitor**: A desktop widget automatically appears showing accumulated context window usage (tokens consumed vs model limit), model name, and project — drag it anywhere, minimize to title bar only
-- **Agent Notes**: The coding agent records insights and lessons learned after each session, building cross-session knowledge that loads automatically on the next task
+- **Context Monitor**: Desktop widget shows context window usage, model, and project — drag it anywhere
+- **Agent Notes**: Coding agent records lessons learned after each session for cross-session continuity
 - **Stop button**: Cancel long-running coding sessions instantly
-- **Reset Node (per-task context clearing)**: After each completed coding task, the graph automatically wipes the conversation message history, freeing the full 256k context window for the next independent request. The agent's **project memory persists in the workspace** — TODO notes, created files, git history, and agent learning notes are all preserved. You can immediately ask "improve what you just built" and the agent will read those artifacts to reconstruct context and continue. Triggered by `update_project_todo(operation="complete_task")` — a unique signal that only the coding agent uses.
 
-**Full User Guide**: 📖 [Slack Tutorial Guide](slack_tutorial_guide.md)
+**Full User Guide**: 📖 [Slack Tutorial Guide](docs/setup/slack_tutorial.md)
 
 ---
 
@@ -378,55 +390,44 @@ Once the app is running, mention the bot in any Slack channel it belongs to.
 
 ### Editing System Prompts
 
-Each agent's system prompt lives in `system_prompts/` as a standalone `.py` file. You can modify any prompt without touching the agent's code. The agent loads the prompt at runtime on every call.
+Each agent's system prompt lives in `system_prompts/` as a standalone `.py` file. Modify any prompt without touching agent code — loaded at runtime on every call.
 
 ```
 system_prompts/
-├── supervisor_prompt.py        # Routing rules, agent descriptions
-├── planner_prompt.py           # Task decomposition logic
-├── researcher_prompt.py        # Search and citation instructions
-├── deep_researcher_prompt.py   # Full page reading instructions
-├── email_composer_prompt.py    # Email format and language rules
-├── linkedin_composer_prompt.py # LinkedIn post formatting
-├── gmail_agent_prompt.py       # Gmail read/search operations
-├── calendar_agent_prompt.py    # Calendar event management
-├── docs_agent_prompt.py        # Google Docs creation/editing
-├── sheets_agent_prompt.py      # Google Sheets management
-├── task_classifier_prompt.py   # Simple vs complex task detection
+├── supervisor_prompt.py        # Tool usage rules, available toolsets, tone
 ├── memory_prompt.py            # Summarization instructions
 └── validator_prompt.py         # Response validation rules
 
 coding_agent/prompts/
-├── main_agent_prompt.py        # Main coding agent instructions, tool descriptions, workspace layout
-└── subagent_prompt.py          # Coding subagent instructions for delegated tasks
+├── main_agent_prompt.py        # Main coding agent instructions
+└── subagent_prompt.py          # Delegated subtask instructions
 ```
 
 ---
 
 ## Workspace Structure
 
-Gemma Swarm uses two separate workspace roots to keep assistant projects and coding projects organised:
-
 ```
 workspaces/
-├── assistant/            # All non-coding assistant projects
+├── assistant/                  # All non-coding assistant projects
 │   └── <project_name>/
-│       ├── research/         # Saved research results
-│       ├── drafts/           # Email/linkedin drafts
-│       └── attachments/      # Uploaded files
-│       
-└── coding/                   # All coding agent projects
+│       ├── research/           # Saved research results
+│       ├── drafts/             # Email/LinkedIn drafts
+│       └── attachments/        # Uploaded files
+│
+└── coding/                     # All coding agent projects
     └── <project_name>/
-        ├── .git/             # Independent git repo (auto-initialised)
-        ├── project_TODO.md   # Live task log managed by the agent
-        └── <source_code>/    # Your actual code (entire project copied/imported here)
-```
+        ├── .git/               # Independent git repo (auto-initialised)
+        ├── project_TODO.md     # Live task log managed by the agent
+        └── <source_code>/      # Your actual code
 
-**Coding workspace features:**
-- Each coding project is its own git repository with automatic commits
-- Project TODO is updated in real-time as tasks are completed
-- Import existing code: provide a local path or GitHub URL when creating a project
-- Agent notes (Optional) are stored separately and loaded at session start for cross-session learning
+docs/
+└── setup/
+    ├── slack_setup.md
+    ├── google_setup.md
+    ├── email_setup.md
+    └── linkedin_setup.md
+```
 
 ---
 

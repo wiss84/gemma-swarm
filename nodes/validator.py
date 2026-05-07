@@ -11,9 +11,9 @@ LLM validation always runs — never skipped.
 import os
 import logging
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from agents_utils.state import AgentState
-from agents_utils.config import LABEL, MODELS
+from agents_utils.config import MODELS
 from agents_utils.rate_limit_handler import RateLimitHandler
 from agents_utils.json_parser import _extract_json
 
@@ -122,14 +122,15 @@ def response_validator_node(state: AgentState) -> dict:
     original_task = state.get("original_task", "")
     retry_counts  = state.get("retry_counts", {})
 
-    # Get the latest supervisor response
+    # Get the latest supervisor response — no label prefix in new design
+    # The last HumanMessage that isn't the user's original message is the supervisor's response.
+    # Supervisor responses are added by _finish() in supervisor_agent.py.
     response_text = ""
     for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
+        if isinstance(msg, AIMessage):
             content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            if content.startswith(LABEL["supervisor"]):
-                response_text = content.replace(LABEL["supervisor"], "").strip()
-                break
+            response_text = content.strip()
+            break
 
     if not response_text:
         logger.warning("[validator] No supervisor response found — passing through.")
@@ -171,7 +172,6 @@ def _handle_invalid(state, messages, retry_counts, reason) -> dict:
         logger.warning("[validator] Max retries reached — escalating to human.")
         return {
             "next_node": "human_gate",
-            "requires_confirmation": True,
             "pending_confirmation": (
                 f"Response validator failed {max_retries} times.\n"
                 f"Last reason: {reason}\nShould I try again?"
@@ -185,8 +185,7 @@ def _handle_invalid(state, messages, retry_counts, reason) -> dict:
         "retry_counts":  {**retry_counts, "validator": validator_retries + 1},
         "messages": messages + [
             HumanMessage(
-                content=f"{LABEL['system']}\n"
-                        f"Your previous response failed validation.\n"
+                content=f"Your previous response failed validation.\n"
                         f"Reason: {reason}\n"
                         f"Please provide a proper response to the original task."
             )

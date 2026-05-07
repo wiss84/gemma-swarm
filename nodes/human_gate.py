@@ -202,14 +202,13 @@ def google_confirm_node(state: AgentState, client=None) -> dict:
         return {"human_decision": "approved", "awaiting_human": False, "next_node": "supervisor"}
 
     try:
-        # Extract the result text from messages
+        # Extract the result text from the most recent supervisor message
         google_result = ""
-        agent_label = f"{LABEL.get(active_agent, active_agent)}:"
         for msg in reversed(messages):
             if isinstance(msg, HumanMessage):
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                if agent_label and content.startswith(agent_label):
-                    google_result = content[len(agent_label):].strip()
+                if content.startswith(LABEL["supervisor"]):
+                    google_result = content[len(LABEL["supervisor"]):].strip()
                     break
         
         blocks = build_google_preview_blocks(google_result or pending_action, thread_ts)
@@ -284,15 +283,14 @@ def _finalize_confirmation_state(state: AgentState, decision: str, next_node: st
             email_draft = {**email_draft, "feedback": feedback}
 
     return {
-        "human_decision":        decision,
-        "awaiting_human":        False,
-        "requires_confirmation": False,
+        "human_decision":              decision,
+        "awaiting_human":              False,
         "google_requires_confirmation": False,
-        "pending_confirmation":  "",
-        "next_node":             next_node,
-        "active_agent":          state.get("active_agent", ""),
-        "linkedin_draft":        linkedin_draft,
-        "email_draft":           email_draft,
+        "pending_confirmation":         "",
+        "next_node":                   next_node,
+        "active_agent":                state.get("active_agent", ""),
+        "linkedin_draft":              linkedin_draft,
+        "email_draft":                 email_draft,
         "messages": messages + [
             HumanMessage(
                 content=f"{LABEL['human']}\nHuman decision: {decision}\nAction: {pending_action}"

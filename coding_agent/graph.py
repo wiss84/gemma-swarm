@@ -101,8 +101,8 @@ def coding_agent_node(state: CodingAgentState) -> dict:
         status_callback=status_callback,
     )
     # Inject session_id so base_agent._call_llm can record token activity
-    agent._current_session_id = session_id
-    agent._current_project_name = state.get("project_name", "")
+    agent._current_session_id   = session_id
+    agent._current_project_name = f"coding\\{state.get('project_name', '')}"
 
     result_text, parsed = agent.run(
         messages=state.get("messages", []),

@@ -31,5 +31,7 @@ HUMAN_EMAIL=your_email@gmail.com
 EMAIL_PASSWORD=xxxx xxxx xxxx xxxx
 ```
 
+8. restart the terminal and resend your message
+
 ---
 
