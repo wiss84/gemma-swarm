@@ -78,6 +78,7 @@ directly in your response. Do not use any tools for this.
 - For tool results (search results, calendar events, gmail): present the information
   cleanly. Preserve links and key details. Don't over-summarize.
 - For tool results (sending emails, publishing to LinkedIn, writing to docs, sheets): Dont provide the content of the email or LinkedIn post, simply acknowledge that it was written and sent or published.
+- After creating sheets, calender events or docs, provide a link to view them.
 - For errors: report them clearly, explain what went wrong, suggest a fix.
 - Use Slack markdown: *bold*, _italic_, `code`, bullet lists with -.
 """

@@ -21,6 +21,7 @@ Flow every turn:
 
 import logging
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
+from typing import List
 from pydantic import BaseModel, Field
 from langchain_core.tools import StructuredTool
 
@@ -65,19 +66,19 @@ class SupervisorAgent(BaseAgent):
 
     def _make_load_toolset_tool(self):
         class Input(BaseModel):
-            toolset_name: str = Field(
-                description="Toolset to load. Available: research, gmail, calendar, docs, sheets, email, linkedin"
+            toolset_names: List[str] = Field(
+                description="One or more toolsets to load. Available: research, gmail, calendar, docs, sheets, email, email_watch, linkedin"
             )
 
-        def _load(toolset_name: str) -> str:
-            return load_toolset(toolset_name)
+        def _load(toolset_names: List[str]) -> str:
+            return load_toolset(toolset_names)
 
         return StructuredTool.from_function(
             func=_load, name="load_toolset", args_schema=Input,
             description=(
-                "Load tools for the current turn. Call this before any integration. "
+                "Load tools for the current turn. Pass a list of one or more toolset names. "
                 "Returns tool names and descriptions. "
-                "Available: research, gmail, calendar, docs, sheets, email, linkedin."
+                "Available: research, gmail, calendar, docs, sheets, email, email_watch, linkedin."
             ),
         )
 
@@ -128,7 +129,9 @@ class SupervisorAgent(BaseAgent):
                             _tool_status_callback("load_toolset")
                         except Exception:
                             pass
-                    toolset_name = args.get("toolset_name", "")
+                    toolset_names = args.get("toolset_names") or args.get("toolset_name") or []
+                    if isinstance(toolset_names, str):
+                        toolset_names = [toolset_names]
                     
                     if session_id:
                         record_token_event(
@@ -137,7 +140,7 @@ class SupervisorAgent(BaseAgent):
                             model=self.model_name, project_name=project_name,
                         )
                     
-                    result = load_toolset(toolset_name)
+                    result = load_toolset(toolset_names)
                     
                     if session_id:
                         record_token_event(
@@ -168,11 +171,14 @@ class SupervisorAgent(BaseAgent):
                         llm_messages.append(ToolMessage(content=result, tool_call_id=tool_id))
                         continue
 
-                    loaded_toolset_name = toolset_name
-                    current_tools       = get_toolset_tools(toolset_name)
-                    logger.info(f"[supervisor] Loaded '{toolset_name}': {[t.name for t in current_tools]}")
+                    loaded_toolset_name = ", ".join(toolset_names)
+                    new_tools           = get_toolset_tools(toolset_names)
+                    # Merge without duplicating already-loaded tools
+                    existing_names = {t.name for t in current_tools}
+                    current_tools += [t for t in new_tools if t.name not in existing_names]
+                    logger.info(f"[supervisor] Loaded {toolset_names}: {[t.name for t in new_tools]}")
                     llm_messages.append(ToolMessage(
-                        content=f"Toolset '{toolset_name}' loaded. Tools: {result}",
+                        content=f"Toolsets {toolset_names} loaded. Tools: {result}",
                         tool_call_id=tool_id,
                     ))
 
