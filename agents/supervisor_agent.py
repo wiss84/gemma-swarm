@@ -33,7 +33,6 @@ from agents_utils.token_activity_tracker import record_token_event, estimate_tok
 from agents_utils.toolset_registry import (
     load_toolset,
     get_toolset_tools,
-    get_available_toolsets_description,
     build_setup_required_response,
     set_slack_context,
     CONFIG_MISSING_PREFIX,
@@ -84,8 +83,7 @@ class SupervisorAgent(BaseAgent):
 
     def get_system_prompt(self) -> str:
         from system_prompts.supervisor_prompt import get_prompt
-        toolsets_desc = get_available_toolsets_description()
-        base = get_prompt(toolsets_description=toolsets_desc)
+        base = get_prompt()
         prefs = get_user_preferences_prompt()
         return base + ("\n\n" + prefs if prefs else "")
 
