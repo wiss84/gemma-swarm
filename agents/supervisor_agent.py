@@ -237,11 +237,6 @@ class SupervisorAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"[supervisor] Context snapshot failed: {e}")
 
-        try:
-            launch_context_ui()
-        except Exception as e:
-            logger.warning(f"[supervisor] UI launch failed: {e}")
-
         return {
             "messages":       new_messages,
             "next_node":      "validator",   # always — no routing decisions here
@@ -278,6 +273,12 @@ def supervisor_agent_node(state: AgentState) -> dict:
     thread_ts = state.get("slack_thread_ts", "")
     channel   = state.get("slack_channel", "")
     set_slack_context(slack_client, thread_ts, channel)
+
+    # Launch UI before thinking starts so it's visible during the whole session
+    try:
+        launch_context_ui()
+    except Exception as e:
+        logger.warning(f"[supervisor] UI launch failed: {e}")
 
     logger.info("[supervisor] Thinking...")
     result = agent.think(state)

@@ -660,6 +660,9 @@ def run_coding_session_slack(
     # Register the status callback in the graph registry so the agent can use it
     register_status_callback(session_id, slack_tool_status_fn)
 
+    # Launch context UI now so it's visible for the whole session
+    launch_context_ui()
+
     # Post initial status
     status_ts = post_status(client, channel, thread_ts, "💻 Coding agent is working...")
     state.coding_status_ts = status_ts or ""
@@ -703,9 +706,6 @@ def run_coding_session_slack(
             model_override=model_override,
             agent_notes_enabled=agent_notes_enabled,
         )
-
-        # Launch context UI after the first agent response — no-op if already running
-        launch_context_ui()
 
     except Exception as e:
         logger.error(f"[coding] Session error: {e}", exc_info=True)
