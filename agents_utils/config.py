@@ -56,7 +56,7 @@ EMAIL_LAYOUTS_DIR = PROJECT_ROOT / "email_layouts"
 
 MODELS = {
     # ── Main graph agents ──────────────────────────────────────────────────────
-    "supervisor":  "gemma-4-31b-it",    # orchestration + direct tool calling
+    "supervisor":  "gemma-4-26b-a4b-it",    # orchestration + direct tool calling
     "memory":      "gemma-4-31b-it",    # context compression
     "validator":   "gemma-4-26b-a4b-it", # pass/fail JSON validation
     # ── Coding Agent ──────────────────────────────────────────────────────────

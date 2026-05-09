@@ -5,17 +5,21 @@ Google Docs API functions for creating, reading, and updating documents.
 Uses OAuth helpers from google_api.py.
 
 docs_create           — creates a doc with plain text
-docs_create_formatted — creates a doc with proper heading/bold/bullet/code formatting
+docs_create_formatted — creates a doc with proper heading/bold/bullet/code/table formatting
 docs_read             — reads a doc and returns plain text
 docs_update           — replaces all content with plain text
 docs_update_formatted — replaces all content with proper formatting applied
+
+Formatting is delegated to agents_utils/docs_parser.py which parses markdown
+into a list of segments (lines blocks and table blocks).
 """
 
 import logging
-import requests
 import re
+import requests as req
 
 from tools.google_api import _get_access_token, _auth_headers
+from agents_utils.docs_parser import parse_content
 
 logger = logging.getLogger(__name__)
 
@@ -25,28 +29,25 @@ logger = logging.getLogger(__name__)
 def docs_create(title: str, content: str, slack_post_fn=None) -> dict:
     """
     Create a new Google Doc with content.
-    
-    Auto-detects markdown formatting markers (headings, lists, bold, code blocks)
-    and uses formatted insertion if detected. Otherwise uses plain text insertion.
+
+    Auto-detects markdown formatting markers and uses formatted insertion if
+    detected. Otherwise uses plain text insertion.
     """
-    # Auto-detect markdown in content
     has_markdown = any([
-        re.search(r'^#+\s', content, re.MULTILINE),  # Headings
-        re.search(r'^[-•]\s', content, re.MULTILINE),  # Bullets
-        re.search(r'^\d+\.\s', content, re.MULTILINE),  # Numbered lists
-        re.search(r'\*\*.*?\*\*', content),  # Bold
-        re.search(r'\*[^*]+\*', content),  # Italic
-        re.search(r'```', content),  # Code blocks
+        re.search(r'^#+\s',       content, re.MULTILINE),
+        re.search(r'^[-•]\s',     content, re.MULTILINE),
+        re.search(r'^\d+\.\s',    content, re.MULTILINE),
+        re.search(r'\*\*.*?\*\*', content),
+        re.search(r'\*[^*]+\*',   content),
+        re.search(r'```',         content),
+        re.search(r'^\|.+\|',     content, re.MULTILINE),
     ])
-    
-    # If markdown detected, use formatted creation
+
     if has_markdown:
         return docs_create_formatted(title, content, slack_post_fn)
-    
-    # Otherwise use plain text
-    token = _get_access_token(slack_post_fn)
 
-    response = requests.post(
+    token = _get_access_token(slack_post_fn)
+    response = req.post(
         "https://docs.googleapis.com/v1/documents",
         headers={**_auth_headers(token), "Content-Type": "application/json"},
         json={"title": title},
@@ -57,7 +58,7 @@ def docs_create(title: str, content: str, slack_post_fn=None) -> dict:
     doc_id = doc["documentId"]
 
     if content:
-        requests.post(
+        req.post(
             f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
             headers={**_auth_headers(token), "Content-Type": "application/json"},
             json={"requests": [{"insertText": {"location": {"index": 1}, "text": content}}]},
@@ -72,7 +73,7 @@ def docs_create(title: str, content: str, slack_post_fn=None) -> dict:
 def docs_read(doc_id: str, slack_post_fn=None) -> dict:
     """Read the content of a Google Doc."""
     token    = _get_access_token(slack_post_fn)
-    response = requests.get(
+    response = req.get(
         f"https://docs.googleapis.com/v1/documents/{doc_id}",
         headers=_auth_headers(token),
         timeout=15,
@@ -92,7 +93,7 @@ def docs_update(doc_id: str, new_content: str, slack_post_fn=None) -> dict:
     """Replace all content in a Google Doc with new plain text."""
     token = _get_access_token(slack_post_fn)
 
-    response = requests.get(
+    response = req.get(
         f"https://docs.googleapis.com/v1/documents/{doc_id}",
         headers=_auth_headers(token),
         timeout=15,
@@ -112,7 +113,7 @@ def docs_update(doc_id: str, new_content: str, slack_post_fn=None) -> dict:
         "insertText": {"location": {"index": 1}, "text": new_content}
     })
 
-    requests.post(
+    req.post(
         f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
         headers={**_auth_headers(token), "Content-Type": "application/json"},
         json={"requests": batch_requests},
@@ -124,33 +125,23 @@ def docs_update(doc_id: str, new_content: str, slack_post_fn=None) -> dict:
     return {"id": doc_id, "title": doc.get("title", ""), "link": link}
 
 
-# ── Formatted create ───────────────────────────────────────────────────────────
+# ── Formatted create / update ──────────────────────────────────────────────────
 
 def docs_create_formatted(title: str, content: str, slack_post_fn=None) -> dict:
     """
-    Create a new Google Doc with proper formatting applied.
+    Create a new Google Doc with full markdown formatting applied.
 
-    Supported markdown-style markers in content:
-    - Lines starting with ##   → Heading 2 (bold, large)
-    - Lines starting with ###  → Heading 3 (bold, medium)
-    - Lines starting with **text** → Bold text (whole line)
-    - Lines starting with - or • → Bulleted list item
-      - If the bullet text starts with **Title:** the title portion is bolded
-        and the rest of the line follows in normal weight.
-        Example: "- **Physical World Integration:** Some explanation here."
-    - Lines starting with 1. 2. etc → Numbered list item
-    - DRAFT 1: / DRAFT 2: etc → Heading 2
-    - All other lines → Normal paragraph
-
-    Process:
-    1. Creates an empty doc
-    2. Inserts all content
-    3. Applies formatting (headings, bold, bullets, etc.)
+    Supported:
+    - Headings (#, ##, ###, ####)
+    - Bullets (- / •) with arbitrary nesting via indentation (2 spaces = 1 level)
+    - Numbered lists (1. 2. ...) with nesting
+    - Inline bold (**text**), italic (*text* / _text_), strikethrough (~~text~~)
+    - Code blocks (``` fenced)
+    - Markdown tables → native Google Docs tables
     """
     token = _get_access_token(slack_post_fn)
 
-    # Step 1: Create empty doc
-    response = requests.post(
+    response = req.post(
         "https://docs.googleapis.com/v1/documents",
         headers={**_auth_headers(token), "Content-Type": "application/json"},
         json={"title": title},
@@ -160,337 +151,228 @@ def docs_create_formatted(title: str, content: str, slack_post_fn=None) -> dict:
     doc    = response.json()
     doc_id = doc["documentId"]
 
-    if not content:
-        link = f"https://docs.google.com/document/d/{doc_id}/edit"
-        return {"id": doc_id, "title": title, "link": link}
-
-    # Step 2: Parse content into structured lines
-    lines = _parse_lines(content)
-
-    # Step 3: Build and execute insertion requests
-    insertion_requests = _build_insertion_requests(lines)
-    
-    if insertion_requests:
-        requests.post(
-            f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
-            headers={**_auth_headers(token), "Content-Type": "application/json"},
-            json={"requests": insertion_requests},
-            timeout=15,
-        ).raise_for_status()
-
-    # Step 4: Apply formatting
-    format_requests = _build_format_requests(lines)
-    if format_requests:
-        requests.post(
-            f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
-            headers={**_auth_headers(token), "Content-Type": "application/json"},
-            json={"requests": format_requests},
-            timeout=15,
-        ).raise_for_status()
+    if content:
+        _apply_formatted_content(doc_id, token, content)
 
     link = f"https://docs.google.com/document/d/{doc_id}/edit"
     logger.info(f"[google/docs] Created formatted doc: {title}")
     return {"id": doc_id, "title": title, "link": link}
 
 
-def _strip_markdown_links(text: str) -> str:
+def docs_update_formatted(doc_id: str, new_content: str, slack_post_fn=None) -> dict:
     """
-    Convert markdown links [label](url) to plain label text.
-    Also strips bare angle-bracket links <url> and reference-style links.
+    Replace all content in a Google Doc with new content, applying full formatting.
     """
-    # [label](url) → label
-    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-    # <url> → url
-    text = re.sub(r'<(https?://[^>]+)>', r'\1', text)
-    return text
+    token = _get_access_token(slack_post_fn)
+
+    response = req.get(
+        f"https://docs.googleapis.com/v1/documents/{doc_id}",
+        headers=_auth_headers(token),
+        timeout=15,
+    )
+    response.raise_for_status()
+    doc       = response.json()
+    end_index = doc.get("body", {}).get("content", [{}])[-1].get("endIndex", 1)
+
+    if end_index > 2:
+        req.post(
+            f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+            headers={**_auth_headers(token), "Content-Type": "application/json"},
+            json={"requests": [{"deleteContentRange": {"range": {"startIndex": 1, "endIndex": end_index - 1}}}]},
+            timeout=15,
+        ).raise_for_status()
+
+    if new_content:
+        _apply_formatted_content(doc_id, token, new_content)
+
+    link = f"https://docs.google.com/document/d/{doc_id}/edit"
+    logger.info(f"[google/docs] Updated formatted doc: {doc_id}")
+    return {"id": doc_id, "title": doc.get("title", ""), "link": link}
 
 
-def _parse_inline_segments(text: str) -> list[dict]:
+# ── Core formatting engine ─────────────────────────────────────────────────────
+
+def _apply_formatted_content(doc_id: str, token: str, content: str) -> None:
     """
-    Split a line of text into segments, each with bold/italic flags.
-    Handles: **bold**, *italic*, ***bold+italic*** combinations.
-    Returns list of {text, bold, italic} dicts.
+    Parse content into segments and apply them to the doc in order.
+
+    For each "lines" segment:
+      1. Fetch doc end index (= where the block will start).
+      2. Build the full insertion string for the block and insert it in ONE
+         request so absolute indices are known precisely.
+      3. Apply all formatting requests using those indices.
+
+    For "table" segments: insert → fetch cell indices → fill cells.
     """
-    segments = []
-    # Order matters: *** before ** before *
-    pattern  = re.compile(r'(\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*([^*].+?[^*]|[^*])\*)')
-    last_end = 0
-    for m in pattern.finditer(text):
-        if m.start() > last_end:
-            segments.append({"text": text[last_end:m.start()], "bold": False, "italic": False})
-        if m.group(2):  # ***text***
-            segments.append({"text": m.group(2), "bold": True,  "italic": True})
-        elif m.group(3):  # **text**
-            segments.append({"text": m.group(3), "bold": True,  "italic": False})
-        elif m.group(4):  # *text* (single star, not double)
-            segments.append({"text": m.group(4), "bold": False, "italic": True})
-        last_end = m.end()
-    if last_end < len(text):
-        segments.append({"text": text[last_end:], "bold": False, "italic": False})
-    return segments if segments else [{"text": text, "bold": False, "italic": False}]
+    segments = parse_content(content)
+
+    for segment in segments:
+        if segment["kind"] == "lines":
+            lines = segment["lines"]
+            if not lines:
+                continue
+
+            # Step 1: where does this block start?
+            block_start = _get_doc_end_index(doc_id, token)
+
+            # Step 2: build full text and insert in one request
+            full_text, line_spans = _build_block_text(lines)
+            if full_text:
+                r = req.post(
+                    f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+                    headers={**_auth_headers(token), "Content-Type": "application/json"},
+                    json={"requests": [{
+                        "insertText": {
+                            "endOfSegmentLocation": {"segmentId": ""},
+                            "text": full_text,
+                        }
+                    }]},
+                    timeout=15,
+                )
+                if not r.ok:
+                    logger.error(f"[google/docs] insertText error {r.status_code}: {r.text}")
+                    r.raise_for_status()
+
+            # Step 3: format using exact absolute positions
+            format_requests = _build_format_requests(lines, line_spans, block_start)
+            if format_requests:
+                r = req.post(
+                    f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+                    headers={**_auth_headers(token), "Content-Type": "application/json"},
+                    json={"requests": format_requests},
+                    timeout=15,
+                )
+                if not r.ok:
+                    logger.error(f"[google/docs] formatRequests error {r.status_code}: {r.text}")
+                    logger.error(f"[google/docs] failed format_requests={format_requests}")
+                    r.raise_for_status()
+
+        elif segment["kind"] == "table":
+            _insert_table(doc_id, token, segment)
 
 
-def _strip_inline_markers(text: str) -> str:
-    """Strip all inline markdown markers (**bold**, *italic*) leaving plain text."""
-    segs = _parse_inline_segments(text)
-    return "".join(s["text"] for s in segs)
+# ── Block text builder ─────────────────────────────────────────────────────────
 
-
-def _parse_lines(content: str) -> list[dict]:
+def _build_block_text(lines: list[dict]) -> tuple[str, list[dict]]:
     """
-    Parse content into a list of structured line dicts.
+    Concatenate all lines into one string for a single insertText call.
 
-    Each dict has:
-      text       — plain text to insert (stars stripped)
-      type       — one of: heading2, heading3, bullet, bullet_bold_title,
-                   numbered, bold_line, code_block, normal
-      bold_end   — (bullet_bold_title only) character offset within text where
-                   the bold portion ends (i.e. length of "Title: ")
+    Returns:
+      full_text  — the complete string to insert (tabs + text + newlines)
+      line_spans — list of {tab_count, text_start_offset, text_end_offset}
+                   giving each line's positions as offsets from the block start,
+                   BEFORE createParagraphBullets strips the tabs.
+
+    Offsets are relative to the start of full_text (i.e. add block_start_index
+    to get absolute document indices).
     """
-    raw_lines    = content.split("\n")
-    lines        = []
-    i            = 0
-    in_code_block = False
-
-    while i < len(raw_lines):
-        raw_line = raw_lines[i]
-        stripped = raw_line.rstrip()
-
-        # Fenced code block toggle (``` or ```python etc)
-        if stripped.startswith("```"):
-            in_code_block = not in_code_block
-            i += 1
-            continue
-
-        if in_code_block:
-            lines.append({"text": raw_line.rstrip("\r"), "type": "code_block"})
-            i += 1
-            continue
-
-        # Check for markdown table block — table parsing removed
-        # (Previously supported markdown tables; now treated as normal text)
-
-        # #### Heading 4 / ##### Heading 5 — collapse to Heading 3
-        if re.match(r'^#{4,}\s', stripped):
-            text = _strip_markdown_links(re.sub(r'^#{4,}\s+', '', stripped).strip())
-            lines.append({"text": text, "type": "heading3"})
-
-        # ### Heading 3 (must check before ## and #)
-        elif stripped.startswith("### "):
-            lines.append({"text": _strip_markdown_links(stripped[4:].strip()), "type": "heading3"})
-
-        # ## Heading 2
-        elif stripped.startswith("## "):
-            lines.append({"text": _strip_markdown_links(stripped[3:].strip()), "type": "heading2"})
-
-        # # Heading 1
-        elif stripped.startswith("# "):
-            lines.append({"text": _strip_markdown_links(stripped[2:].strip()), "type": "heading1"})
-
-        # DRAFT N: pattern
-        elif re.match(r"^DRAFT\s+\d+\s*:", stripped, re.IGNORECASE):
-            lines.append({"text": _strip_markdown_links(stripped), "type": "heading2"})
-
-        # Bullet list item
-        elif stripped.startswith("- ") or stripped.startswith("• "):
-            text = _strip_markdown_links(stripped[2:].strip())
-
-            # Check for bold title prefix: **Title:** rest of text
-            bold_prefix_match = re.match(r"^\*\*(.+?)\*\*[:\-]?\s*", text)
-            if bold_prefix_match:
-                bold_part  = bold_prefix_match.group(1).rstrip(":- ")
-                after_bold = text[bold_prefix_match.end():]
-                plain = f"{bold_part}: {after_bold}" if after_bold else bold_part
-                lines.append({
-                    "text":     plain,
-                    "type":     "bullet_bold_title",
-                    "bold_end": len(bold_part) + 2,
-                })
-            else:
-                clean = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-                lines.append({"text": clean, "type": "bullet"})
-
-        # Numbered list item (1. 2. etc)
-        elif re.match(r"^\d+\.\s", stripped):
-            text = _strip_markdown_links(re.sub(r"^\d+\.\s+", "", stripped))
-            segments = _parse_inline_segments(text)
-            plain    = "".join(s["text"] for s in segments)
-            if any(s["bold"] or s["italic"] for s in segments):
-                lines.append({"text": plain, "type": "numbered", "segments": segments})
-            else:
-                lines.append({"text": plain, "type": "numbered"})
-
-        # Whole line is bold (**text**)
-        elif stripped.startswith("**") and stripped.endswith("**") and len(stripped) > 4:
-            lines.append({"text": _strip_markdown_links(stripped[2:-2]), "type": "bold_line"})
-
-        # Empty line
-        elif stripped == "":
-            lines.append({"text": "", "type": "normal"})
-
-        # Normal paragraph
-        else:
-            clean = re.sub(r"\*\*(.+?)\*\*", r"\1", stripped)
-            clean = _strip_markdown_links(clean)
-            lines.append({"text": clean, "type": "normal"})
-
-        i += 1
-
-    return lines
-
-
-def _build_insertion_requests(lines: list[dict]) -> list[dict]:
-    """
-    Build Google Docs API requests to insert all content.
-    """
-    requests_list = []
-    index = 1
+    parts      = []
+    line_spans = []
+    offset     = 0
 
     for line in lines:
-        text = line["text"]
-        length = len(text)
-        if length > 0:
-            requests_list.append({
-                "insertText": {
-                    "location": {"index": index},
-                    "text": text
-                }
-            })
-            index += length
+        indent       = line.get("indent", 0)
+        is_list_item = line["type"] in ("bullet", "bullet_bold_title", "numbered")
+        tab_count    = indent if is_list_item else 0
+        prefix       = "\t" * tab_count
+        text         = line["text"]
+        full_line    = prefix + text + "\n"
 
-        # Newline after each line
-        requests_list.append({
-            "insertText": {
-                "location": {"index": index},
-                "text": "\n"
-            }
+        line_spans.append({
+            "tab_count":         tab_count,
+            "line_start_offset": offset,
+            "text_start_offset": offset + tab_count,
+            "text_end_offset":   offset + tab_count + len(text),
+            "line_end_offset":   offset + tab_count + len(text),  # excludes \n
         })
-        index += 1
 
-    return requests_list
+        parts.append(full_line)
+        offset += len(full_line)
+
+    return "".join(parts), line_spans
 
 
-def _build_format_requests(lines: list[dict]) -> list[dict]:
+# ── Format request builder ─────────────────────────────────────────────────────
+
+def _build_format_requests(lines: list[dict], line_spans: list[dict],
+                           block_start: int) -> list[dict]:
     """
-    Build Google Docs API batchUpdate requests to apply formatting.
-    We track character positions as we go through the lines.
-    Index starts at 1 (Google Docs indexes from 1, not 0).
+    Build all formatting requests for a lines block.
+
+    Uses line_spans (offsets from _build_block_text) + block_start to compute
+    absolute document indices.
+
+    Key insight for nested lists: createParagraphBullets strips leading tabs
+    and shifts all subsequent indices. To avoid this, we group all contiguous
+    list items of the same type into ONE createParagraphBullets request
+    covering the whole group. Within a group the tabs haven't been stripped
+    yet, so our offsets are still valid. After the group request fires,
+    tabs are gone — but we've already computed all offsets up front from the
+    original full_text layout, so nothing breaks.
+
+    We emit: heading/bold/code/inline styles first, then all bullet groups,
+    then all numbered groups — so createParagraphBullets fires after all
+    index-sensitive style requests.
     """
-    requests_list = []
-    index = 1  # current character position in the doc
+    style_requests  = []   # heading, bold_line, code_block, inline styles
+    bullet_groups   = []   # [{start, end}] one per contiguous bullet run
+    numbered_groups = []   # [{start, end}] one per contiguous numbered run
 
-    for line in lines:
-        text      = line["text"]
-        line_type = line["type"]
+    # Track contiguous list runs
+    cur_bullet_start   = None
+    cur_bullet_end     = None
+    cur_numbered_start = None
+    cur_numbered_end   = None
 
-        length = len(text)
-        if length == 0:
-            index += 1  # newline character
-            continue
+    def flush_bullet():
+        if cur_bullet_start is not None:
+            bullet_groups.append({"start": cur_bullet_start, "end": cur_bullet_end})
 
-        end_index = index + length
+    def flush_numbered():
+        if cur_numbered_start is not None:
+            numbered_groups.append({"start": cur_numbered_start, "end": cur_numbered_end})
 
+    for i, (line, span) in enumerate(zip(lines, line_spans)):
+        line_type  = line["type"]
+        abs_line_s = block_start + span["line_start_offset"]
+        abs_line_e = block_start + span["line_end_offset"]
+        abs_text_s = block_start + span["text_start_offset"]
+        abs_text_e = block_start + span["text_end_offset"]
+        text_len   = abs_text_e - abs_text_s
+
+        is_bullet   = line_type in ("bullet", "bullet_bold_title")
+        is_numbered = line_type == "numbered"
+
+        # ── Flush list runs when type changes ─────────────────────────────
+        if not is_bullet and cur_bullet_start is not None:
+            flush_bullet()
+            cur_bullet_start = cur_bullet_end = None
+
+        if not is_numbered and cur_numbered_start is not None:
+            flush_numbered()
+            cur_numbered_start = cur_numbered_end = None
+
+        # ── Per-line style requests ────────────────────────────────────────
         if line_type == "heading1":
-            requests_list.append({
-                "updateParagraphStyle": {
-                    "range":          {"startIndex": index, "endIndex": end_index},
-                    "paragraphStyle": {"namedStyleType": "HEADING_1"},
-                    "fields":         "namedStyleType",
-                }
-            })
+            style_requests.append(_para_style(abs_line_s, abs_line_e, "HEADING_1"))
 
         elif line_type == "heading2":
-            requests_list.append({
-                "updateParagraphStyle": {
-                    "range":          {"startIndex": index, "endIndex": end_index},
-                    "paragraphStyle": {"namedStyleType": "HEADING_2"},
-                    "fields":         "namedStyleType",
-                }
-            })
+            style_requests.append(_para_style(abs_line_s, abs_line_e, "HEADING_2"))
 
         elif line_type == "heading3":
-            requests_list.append({
-                "updateParagraphStyle": {
-                    "range":          {"startIndex": index, "endIndex": end_index},
-                    "paragraphStyle": {"namedStyleType": "HEADING_3"},
-                    "fields":         "namedStyleType",
-                }
-            })
+            style_requests.append(_para_style(abs_line_s, abs_line_e, "HEADING_3"))
 
         elif line_type == "bold_line":
-            requests_list.append({
-                "updateTextStyle": {
-                    "range":     {"startIndex": index, "endIndex": end_index},
-                    "textStyle": {"bold": True},
-                    "fields":    "bold",
-                }
-            })
-
-        elif line_type == "bullet":
-            requests_list.append({
-                "createParagraphBullets": {
-                    "range":        {"startIndex": index, "endIndex": end_index},
-                    "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE",
-                }
-            })
-
-        elif line_type == "bullet_bold_title":
-            # Apply bullet formatting to the whole line
-            requests_list.append({
-                "createParagraphBullets": {
-                    "range":        {"startIndex": index, "endIndex": end_index},
-                    "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE",
-                }
-            })
-            # Apply bold only to the title portion (up to bold_end)
-            bold_end = line.get("bold_end", length)
-            requests_list.append({
-                "updateTextStyle": {
-                    "range":     {"startIndex": index, "endIndex": index + bold_end},
-                    "textStyle": {"bold": True},
-                    "fields":    "bold",
-                }
-            })
-
-        elif line_type == "numbered":
-            requests_list.append({
-                "createParagraphBullets": {
-                    "range":        {"startIndex": index, "endIndex": end_index},
-                    "bulletPreset": "NUMBERED_DECIMAL_ALPHA_ROMAN",
-                }
-            })
-            # Apply inline bold/italic if segments were parsed
-            segments = line.get("segments")
-            if segments:
-                seg_cursor = index
-                for seg in segments:
-                    seg_len = len(seg["text"])
-                    if seg_len > 0 and (seg["bold"] or seg["italic"]):
-                        style = {}
-                        fields = []
-                        if seg["bold"]:
-                            style["bold"] = True
-                            fields.append("bold")
-                        if seg["italic"]:
-                            style["italic"] = True
-                            fields.append("italic")
-                        requests_list.append({
-                            "updateTextStyle": {
-                                "range":     {"startIndex": seg_cursor, "endIndex": seg_cursor + seg_len},
-                                "textStyle": style,
-                                "fields":    ",".join(fields),
-                            }
-                        })
-                    seg_cursor += seg_len
+            style_requests.append(_text_style(abs_line_s, abs_line_e, bold=True))
 
         elif line_type == "code_block":
-            requests_list.append({
+            style_requests.append({
                 "updateTextStyle": {
-                    "range": {"startIndex": index, "endIndex": end_index},
+                    "range":     {"startIndex": abs_line_s, "endIndex": abs_line_e},
                     "textStyle": {
                         "weightedFontFamily": {"fontFamily": "Courier New"},
                         "fontSize":           {"magnitude": 10, "unit": "PT"},
-                        "backgroundColor":   {
+                        "backgroundColor": {
                             "color": {
                                 "rgbColor": {"red": 0.937, "green": 0.937, "blue": 0.937}
                             }
@@ -500,11 +382,255 @@ def _build_format_requests(lines: list[dict]) -> list[dict]:
                 }
             })
 
-        # +1 for the newline character after each line
-        index = end_index + 1
+        elif is_bullet:
+            # Extend or start bullet run
+            if cur_bullet_start is None:
+                cur_bullet_start = abs_line_s
+            cur_bullet_end = abs_line_e
 
+            # bold title
+            if line_type == "bullet_bold_title":
+                bold_end = line.get("bold_end", text_len)
+                style_requests.append(_text_style(abs_text_s, abs_text_s + bold_end, bold=True))
+
+            # inline markup
+            segs = line.get("segments")
+            if segs:
+                style_requests.extend(_inline_style_requests(abs_text_s, segs))
+
+        elif is_numbered:
+            if cur_numbered_start is None:
+                cur_numbered_start = abs_line_s
+            cur_numbered_end = abs_line_e
+
+            segs = line.get("segments")
+            if segs:
+                style_requests.extend(_inline_style_requests(abs_text_s, segs))
+
+        elif line_type == "normal":
+            segs = line.get("segments")
+            if segs:
+                style_requests.extend(_inline_style_requests(abs_text_s, segs))
+
+    # Flush any open list runs at end of block
+    flush_bullet()
+    flush_numbered()
+
+    # Build bullet/numbered group requests
+    list_requests = []
+    for g in bullet_groups:
+        list_requests.append({
+            "createParagraphBullets": {
+                "range":        {"startIndex": g["start"], "endIndex": g["end"]},
+                "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE",
+            }
+        })
+    for g in numbered_groups:
+        list_requests.append({
+            "createParagraphBullets": {
+                "range":        {"startIndex": g["start"], "endIndex": g["end"]},
+                "bulletPreset": "NUMBERED_DECIMAL_ALPHA_ROMAN",
+            }
+        })
+
+    # Style requests first (indices still valid), list requests last
+    return style_requests + list_requests
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _get_doc_end_index(doc_id: str, token: str) -> int:
+    """Fetch the current end index of the document body."""
+    response = req.get(
+        f"https://docs.googleapis.com/v1/documents/{doc_id}",
+        headers=_auth_headers(token),
+        timeout=15,
+    )
+    response.raise_for_status()
+    doc = response.json()
+    return doc.get("body", {}).get("content", [{}])[-1].get("endIndex", 1)
+
+
+# ── Table insertion ────────────────────────────────────────────────────────────
+
+def _insert_table(doc_id: str, token: str, table_seg: dict) -> None:
+    """
+    Insert a markdown table segment as a native Google Docs table.
+
+    Process:
+      1. Fetch current end index so we know where to insert.
+      2. insertTable (creates empty rows x cols table).
+      3. Fetch the updated doc to discover each cell's startIndex.
+      4. Insert text into each cell via insertText requests (reverse order).
+      5. Bold the header row.
+    """
+    headers  = table_seg["headers"]
+    rows     = table_seg["rows"]
+    num_cols = len(headers)
+    all_rows = [headers] + rows
+    num_rows = len(all_rows)
+
+    if num_rows == 0 or num_cols == 0:
+        return
+
+    end_index = _get_doc_end_index(doc_id, token)
+    insert_at = max(end_index - 1, 1)
+
+    r = req.post(
+        f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+        headers={**_auth_headers(token), "Content-Type": "application/json"},
+        json={"requests": [{"insertTable": {"rows": num_rows, "columns": num_cols, "location": {"index": insert_at}}}]},
+        timeout=15,
+    )
+    if not r.ok:
+        logger.error(f"[google/docs] insertTable error {r.status_code}: {r.text}")
+        r.raise_for_status()
+
+    response = req.get(
+        f"https://docs.googleapis.com/v1/documents/{doc_id}",
+        headers=_auth_headers(token),
+        timeout=15,
+    )
+    response.raise_for_status()
+    cell_indices = _extract_table_cell_indices(response.json(), insert_at)
+
+    if not cell_indices:
+        logger.warning("[google/docs] Could not find table cell indices after insertion.")
+        return
+
+    insert_requests = []
+    for row_i, row_data in enumerate(all_rows):
+        for col_i, cell_text in enumerate(row_data):
+            flat_index = row_i * num_cols + col_i
+            if flat_index >= len(cell_indices) or not cell_text:
+                continue
+            insert_requests.append({
+                "insertText": {
+                    "location": {"index": cell_indices[flat_index]},
+                    "text":     cell_text,
+                }
+            })
+
+    if insert_requests:
+        insert_requests.sort(key=lambda r: r["insertText"]["location"]["index"], reverse=True)
+        r = req.post(
+            f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+            headers={**_auth_headers(token), "Content-Type": "application/json"},
+            json={"requests": insert_requests},
+            timeout=15,
+        )
+        if not r.ok:
+            logger.error(f"[google/docs] fillCells error {r.status_code}: {r.text}")
+            r.raise_for_status()
+
+    bold_requests = []
+    for col_i, header_text in enumerate(headers):
+        if col_i >= len(cell_indices) or not header_text:
+            continue
+        cell_start = cell_indices[col_i]
+        bold_requests.append(_text_style(cell_start, cell_start + len(header_text), bold=True))
+
+    if bold_requests:
+        r = req.post(
+            f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+            headers={**_auth_headers(token), "Content-Type": "application/json"},
+            json={"requests": bold_requests},
+            timeout=15,
+        )
+        if not r.ok:
+            logger.error(f"[google/docs] boldHeaders error {r.status_code}: {r.text}")
+            r.raise_for_status()
+
+
+def _extract_table_cell_indices(doc: dict, insert_at: int) -> list[int]:
+    """
+    Walk the document body to find the table inserted near insert_at and
+    return the insertion index for each cell in row-major order.
+    """
+    body_content = doc.get("body", {}).get("content", [])
+    target_table = None
+
+    for element in body_content:
+        if "table" not in element:
+            continue
+        if abs(element.get("startIndex", 0) - insert_at) <= 2:
+            target_table = element["table"]
+            break
+
+    if target_table is None:
+        for element in reversed(body_content):
+            if "table" in element:
+                target_table = element["table"]
+                break
+
+    if target_table is None:
+        return []
+
+    cell_indices = []
+    for table_row in target_table.get("tableRows", []):
+        for cell in table_row.get("tableCells", []):
+            cell_content = cell.get("content", [])
+            if cell_content:
+                para_start = cell_content[0].get("startIndex")
+                if para_start is not None:
+                    cell_indices.append(para_start)
+    return cell_indices
+
+
+# ── Style helper functions ─────────────────────────────────────────────────────
+
+def _para_style(start: int, end: int, named_style: str) -> dict:
+    return {
+        "updateParagraphStyle": {
+            "range":          {"startIndex": start, "endIndex": end},
+            "paragraphStyle": {"namedStyleType": named_style},
+            "fields":         "namedStyleType",
+        }
+    }
+
+
+def _text_style(start: int, end: int, bold: bool = False, italic: bool = False,
+                strikethrough: bool = False) -> dict:
+    style  = {}
+    fields = []
+    if bold:
+        style["bold"] = True
+        fields.append("bold")
+    if italic:
+        style["italic"] = True
+        fields.append("italic")
+    if strikethrough:
+        style["strikethrough"] = True
+        fields.append("strikethrough")
+    return {
+        "updateTextStyle": {
+            "range":     {"startIndex": start, "endIndex": end},
+            "textStyle": style,
+            "fields":    ",".join(fields),
+        }
+    }
+
+
+def _inline_style_requests(base_index: int, segments: list[dict]) -> list[dict]:
+    """Build updateTextStyle requests for inline segments starting at base_index."""
+    requests_list = []
+    cursor = base_index
+    for seg in segments:
+        seg_len = len(seg["text"])
+        if seg_len > 0 and (seg.get("bold") or seg.get("italic") or seg.get("strikethrough")):
+            requests_list.append(
+                _text_style(
+                    cursor, cursor + seg_len,
+                    bold=seg.get("bold", False),
+                    italic=seg.get("italic", False),
+                    strikethrough=seg.get("strikethrough", False),
+                )
+            )
+        cursor += seg_len
     return requests_list
 
+
+# ── Plain text extractor ───────────────────────────────────────────────────────
 
 def _extract_docs_text(doc: dict) -> str:
     """Extract plain text from a Google Doc document structure."""
@@ -518,70 +644,3 @@ def _extract_docs_text(doc: dict) -> str:
             if run:
                 text.append(run.get("content", ""))
     return "".join(text)
-
-
-# ── Formatted update ───────────────────────────────────────────────────────────
-
-def docs_update_formatted(doc_id: str, new_content: str, slack_post_fn=None) -> dict:
-    """
-    Replace all content in a Google Doc with new content, applying full formatting.
-    Same formatting rules as docs_create_formatted.
-    """
-    token = _get_access_token(slack_post_fn)
-
-    # Step 1: Get current doc to find end index for deletion
-    response = requests.get(
-        f"https://docs.googleapis.com/v1/documents/{doc_id}",
-        headers=_auth_headers(token),
-        timeout=15,
-    )
-    response.raise_for_status()
-    doc       = response.json()
-    end_index = doc.get("body", {}).get("content", [{}])[-1].get("endIndex", 1)
-
-    # Step 2: Clear existing content
-    clear_requests = []
-    if end_index > 2:
-        clear_requests.append({
-            "deleteContentRange": {
-                "range": {"startIndex": 1, "endIndex": end_index - 1}
-            }
-        })
-
-    if clear_requests:
-        requests.post(
-            f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
-            headers={**_auth_headers(token), "Content-Type": "application/json"},
-            json={"requests": clear_requests},
-            timeout=15,
-        ).raise_for_status()
-
-    if not new_content:
-        link = f"https://docs.google.com/document/d/{doc_id}/edit"
-        return {"id": doc_id, "title": doc.get("title", ""), "link": link}
-
-    # Step 3: Parse and build insertion requests
-    lines = _parse_lines(new_content)
-    insertion_requests = _build_insertion_requests(lines)
-    
-    if insertion_requests:
-        requests.post(
-            f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
-            headers={**_auth_headers(token), "Content-Type": "application/json"},
-            json={"requests": insertion_requests},
-            timeout=15,
-        ).raise_for_status()
-
-    # Step 4: Apply formatting
-    format_requests = _build_format_requests(lines)
-    if format_requests:
-        requests.post(
-            f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
-            headers={**_auth_headers(token), "Content-Type": "application/json"},
-            json={"requests": format_requests},
-            timeout=15,
-        ).raise_for_status()
-
-    link = f"https://docs.google.com/document/d/{doc_id}/edit"
-    logger.info(f"[google/docs] Updated formatted doc: {doc_id}")
-    return {"id": doc_id, "title": doc.get("title", ""), "link": link}
