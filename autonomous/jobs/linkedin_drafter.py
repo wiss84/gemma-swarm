@@ -50,7 +50,7 @@ def _draft_for_topic(
 ):
     """Generate and post LinkedIn drafts for a single research topic."""
     from autonomous import pipeline_agent
-    from tools.docs_api import docs_create_formatted
+    from tools.docs_api import docs_create
 
     topic     = result["topic"]
     synthesis = result["synthesis"]
@@ -104,7 +104,7 @@ DRAFT 3:
     )
 
     try:
-        doc  = docs_create_formatted(title=doc_title, content=doc_content)
+        doc  = docs_create(title=doc_title, content=doc_content)
         link = doc["link"]
         logger.info(f"[linkedin_drafter] Formatted doc created for '{topic}': {link}")
     except Exception as e:

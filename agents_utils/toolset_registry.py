@@ -184,7 +184,7 @@ def _get_calendar_tools():
 # ── Docs ──────────────────────────────────────────────────────────────────────
 
 def _get_docs_tools():
-    from tools.docs_api import docs_create_formatted, docs_update_formatted, docs_read
+    from tools.docs_api import docs_create, docs_update, docs_read
 
     class DocsCreateInput(BaseModel):
         title:   str = Field(description="Document title")
@@ -199,14 +199,14 @@ def _get_docs_tools():
         preview = content[:500] + ("..." if len(content) > 500 else "")
         return _google_write_with_confirm(
             f"Create Google Doc: *{title}*\n\nPreview:\n```{preview}```",
-            lambda: docs_create_formatted(title=title, content=content))
+            lambda: docs_create(title=title, content=content))
 
     def _docs_update(doc_id: str, content: str, append: bool = False) -> str:
         action = "Append to" if append else "Update"
         preview = content[:500] + ("..." if len(content) > 500 else "")
         return _google_write_with_confirm(
             f"{action} Google Doc `{doc_id}`\n\nPreview:\n```{preview}```",
-            lambda: docs_update_formatted(doc_id=doc_id, new_content=content))
+            lambda: docs_update(doc_id=doc_id, new_content=content))
 
     def _docs_read(doc_id: str) -> str:
         return str(docs_read(doc_id=doc_id))

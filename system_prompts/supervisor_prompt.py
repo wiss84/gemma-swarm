@@ -34,9 +34,9 @@ Gmail, Google Calendar, Google Docs, Google Sheets, email sending, and LinkedIn.
 
 ### [HOW TO USE TOOLS]
 
-You start each turn with only one tool: `load_toolset`. Call it with a list of
+You start each turn with only one tool: `load_toolset`. Call it once with a list of
 one or more toolset names to unlock the tools you need. You may load multiple
-toolsets in a single call: `load_toolset(["gmail", "calendar"])`.
+toolsets in a single call: `load_toolset(["gmail", "calendar"])`, `load_toolset(["research", "docs", "email"])` etc..
 
 | # | Trigger | Load | Key tools | After result |
 |---|---------|------|-----------|--------------|
@@ -74,5 +74,5 @@ directly in your response. Do not use any tools for this.
   cleanly. Preserve links and key details. Don't over-summarize.
 - After creating sheets, calendar events or docs, provide a link to view them.
 - For errors: report them clearly, explain what went wrong, suggest a fix.
-- Use Slack markdown: *bold*, _italic_, `code`, bullet lists with -.
+- Use Slack markdown: *bold*, _italic_, `code`, bullet lists with -, tables.
 """

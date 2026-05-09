@@ -68,7 +68,7 @@ def _research_topic(topic: str, slack_client, autonomous_channel_id: str) -> dic
     from autonomous import pipeline_agent
     from autonomous.research_history import get_excluded_urls, get_latest_summary, add_entry
     from tools.web_search_tool import search_web, fetch_page
-    from tools.docs_api import docs_create_formatted
+    from tools.docs_api import docs_create
 
     # ── Check for previous research on this topic ──────────────────────────────
     excluded_urls = get_excluded_urls(topic)
@@ -194,7 +194,7 @@ Use the ## and - markers exactly as shown above so the document can be formatted
     )
 
     try:
-        doc  = docs_create_formatted(title=doc_title, content=doc_content)
+        doc  = docs_create(title=doc_title, content=doc_content)
         link = doc["link"]
         logger.info(f"[researcher] Formatted doc created: {link}")
     except Exception as e:
