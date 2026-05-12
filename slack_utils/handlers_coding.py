@@ -50,14 +50,15 @@ from slack_utils.thread_state import (
     delete_status,
     update_status,
 )
-from slack_utils.rate_callbacks import make_wait_callback
+from slack_utils.rate_callbacks import make_wait_callback, make_retry_callback
 
 logger = logging.getLogger(__name__)
 
-# Module-level rate-limit wait callback for the coding agent.
+# Module-level rate-limit wait and server-error retry callbacks for the coding agent.
 # Set by run_coding_session_slack() before the graph runs, cleared in finally.
-# CodingAgent.__init__ picks this up and assigns it to its rate_limiter.on_wait.
-_coding_rate_wait_callback = None
+# CodingAgent.__init__ picks these up and assigns them to its rate_limiter.
+_coding_rate_wait_callback   = None
+_coding_rate_retry_callback  = None
 
 
 def set_coding_rate_callback(callback):
@@ -72,6 +73,20 @@ def clear_coding_rate_callback():
 
 def get_coding_rate_callback():
     return _coding_rate_wait_callback
+
+
+def set_coding_retry_callback(callback):
+    global _coding_rate_retry_callback
+    _coding_rate_retry_callback = callback
+
+
+def clear_coding_retry_callback():
+    global _coding_rate_retry_callback
+    _coding_rate_retry_callback = None
+
+
+def get_coding_retry_callback():
+    return _coding_rate_retry_callback
 
 
 SETTINGS_FILE         = PROJECT_ROOT / "coding_session_settings.json"
@@ -623,10 +638,12 @@ def run_coding_session_slack(
     # Set module-level Slack context for this session
     set_coding_slack_context(thread_ts=thread_ts, channel=channel, client=client)
 
-    # Register rate-limit wait callback so the coding agent posts countdown
-    # messages to Slack when RPM/TPM limits are hit (same UX as supervisor graph).
-    wait_cb = make_wait_callback(client, channel, thread_ts)
+    # Register rate-limit wait callback and server-error retry callback so the coding agent
+    # posts countdown messages to Slack for both scenarios (same UX as supervisor graph).
+    wait_cb  = make_wait_callback(client, channel, thread_ts)
+    retry_cb = make_retry_callback(client, channel, thread_ts)
     set_coding_rate_callback(wait_cb)
+    set_coding_retry_callback(retry_cb)
 
     state  = get_thread_state(thread_ts)
     settings = load_coding_settings()
@@ -714,8 +731,9 @@ def run_coding_session_slack(
         # Unregister the status callback
         unregister_status_callback(session_id)
 
-        # Clear the rate-limit callback
+        # Clear the rate-limit and retry callbacks
         clear_coding_rate_callback()
+        clear_coding_retry_callback()
 
         # Clean up status messages
         delete_status(client, channel, state.coding_status_ts)

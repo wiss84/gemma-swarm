@@ -51,6 +51,11 @@ class ThreadState:
     coding_active:     bool            = False  # True while the coding agent is running
     coding_status_ts:  str             = ""     # ts of the current tool-status message
 
+    # Error retry state
+    last_error:        str             = ""     # Last exception message
+    retry_config:      dict | None     = None   # Saved LangGraph config for resuming
+    retry_message:     str             = ""     # Original user message to retry
+
 
 _threads: dict[str, ThreadState] = {}
 _threads_lock = threading.Lock()

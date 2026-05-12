@@ -134,6 +134,15 @@ class CodingAgent(BaseAgent):
         except Exception:
             pass  # Not running in Slack context — no callback needed
 
+        # Pick up any Slack retry callback for server errors.
+        try:
+            from slack_utils.handlers_coding import get_coding_retry_callback
+            rcb = get_coding_retry_callback()
+            if rcb:
+                self.rate_limiter.on_retry = rcb
+        except Exception:
+            pass
+
         # Build the spawn_subagent tool bound to this instance
         spawn_tool = self._build_spawn_tool()
 

@@ -39,7 +39,7 @@ from slack_utils.thread_state       import (
     delete_status,
     update_status,
 )
-from slack_utils.rate_callbacks     import register_wait_callbacks, clear_wait_callbacks
+from slack_utils.rate_callbacks     import register_wait_callbacks, clear_wait_callbacks, register_retry_callbacks, clear_retry_callbacks
 from slack_utils.handlers_workspace import build_workspace_blocks, build_graph_selector_blocks
 from slack_utils.handlers_confirm   import register_confirm_handlers
 from slack_utils.handlers_linkedin  import register_linkedin_handlers
@@ -54,10 +54,13 @@ from slack_utils.handlers_coding    import register_coding_handlers, run_coding_
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
-# logging.getLogger("agents_utils").setLevel(logging.WARNING)
+logging.getLogger("agents_utils").setLevel(logging.WARNING)
 logging.getLogger("autonomous").setLevel(logging.WARNING)
-# logging.getLogger("tools").setLevel(logging.WARNING)
+logging.getLogger("tools").setLevel(logging.WARNING)
 logging.getLogger("coding_agent").setLevel(logging.WARNING)
+logging.getLogger("nodes").setLevel(logging.WARNING)
+logging.getLogger("agents").setLevel(logging.WARNING)
+logging.getLogger("agents_utils").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -77,7 +80,7 @@ def _strip_slack_formatting(text: str) -> str:
 
 # ── Core Worker ────────────────────────────────────────────────────────────────
 
-def _run_agent(message: str, thread_ts: str, channel: str, client, say):
+def _run_agent(message: str, thread_ts: str, channel: str, client, say, _is_retry: bool = False):
     """
     Core worker. Runs in a background thread.
     Posts a single tool-status message that updates per tool call.
@@ -88,6 +91,7 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say):
 
     set_slack_client(client, lambda ts: ts)
     register_wait_callbacks(client, channel, thread_ts)
+    register_retry_callbacks(client, channel, thread_ts)
 
     compiled_graph = get_graph()
     langgraph_thread = getattr(state, "langgraph_thread_ts", "") or state.active_thread_id
@@ -125,6 +129,7 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say):
             slack_channel=channel,
             compiled_graph=compiled_graph,
             config=config,
+            is_retry=_is_retry,
         )
 
         for chunk in compiled_graph.stream(input_state, config, stream_mode="updates"):
@@ -186,12 +191,50 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say):
 
     except Exception as e:
         logger.error(f"[slack] Agent error: {e}")
-        formatted_output = [f"❌ An error occurred: {e}"]
+        
+        # Store error info for retry
+        state.last_error = str(e)
+        state.retry_config = config
+        state.retry_message = message
+        
+        # Build error message with Continue button
+        error_text = f"❌ An error occurred: `{e}`"
+        button_blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": error_text}
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "🔄 Continue", "emoji": True},
+                        "action_id": "continue_after_error",
+                        "value": thread_ts,
+                        "style": "primary"
+                    }
+                ]
+            }
+        ]
+        
+        try:
+            client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                blocks=button_blocks,
+                mrkdwn=True
+            )
+        except Exception as post_err:
+            logger.error(f"[slack] Could not post error with button: {post_err}")
+            # Fallback to simple text message
+            formatted_output = [f"❌ An error occurred: {e}"]
 
     finally:
         delete_status(client, channel, _tool_status_ts["ts"] or "")
         clear_tool_status_callback()
         clear_wait_callbacks()
+        clear_retry_callbacks()
         state.status_ts = ""
         state.active    = False
 
@@ -358,23 +401,35 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say):
         _run_agent(next_msg, thread_ts, channel, client, say)
 
 
-def _build_input_state(message, state, slack_thread_ts, slack_channel, compiled_graph, config):
-    """Build input state for graph.stream()."""
+def _build_input_state(message, state, slack_thread_ts, slack_channel, compiled_graph, config, is_retry: bool = False):
+    """Build input state for graph.stream().
+    
+    Args:
+        is_retry: If True, returns the existing checkpoint state unchanged
+                  (no new HumanMessage is appended). Used to resume after errors.
+    """
     try:
         existing      = compiled_graph.get_state(config)
-        existing_msgs = existing.values.get("messages", []) if existing.values else []
+        existing_vals = existing.values if existing.values else {}
     except Exception:
-        existing_msgs = []
+        existing_vals = {}
 
-    if existing_msgs:
-        return {
-            "messages": existing_msgs + [HumanMessage(content=message)],
-            "slack_thread_ts":  slack_thread_ts,
-            "slack_channel":    slack_channel,
-            "task_complete":    False,
-            "formatted_output": [],
-            "loaded_toolset":   "",
-        }
+    if existing_vals:
+        if is_retry:
+            # Resume from the last checkpoint; do not modify state
+            return existing_vals
+        else:
+            # New user message — append to existing conversation
+            msgs = existing_vals.get("messages", []) + [HumanMessage(content=message)]
+            return {
+                **existing_vals,
+                "messages": msgs,
+                "slack_thread_ts":  slack_thread_ts,
+                "slack_channel":    slack_channel,
+                "task_complete":    False,
+                "formatted_output": [],
+                "loaded_toolset":   "",
+            }
     else:
         s = default_state(
             original_task=message,
@@ -391,6 +446,11 @@ def _build_input_state(message, state, slack_thread_ts, slack_channel, compiled_
 def _handle_message(message: str, thread_ts: str, channel: str, client, say):
     """Handle incoming message — interrupt or run directly."""
     state = get_thread_state(thread_ts)
+    
+    # Clear any pending error retry state — fresh user intent
+    state.retry_message = ""
+    state.last_error = ""
+    state.retry_config = None
 
     if state.active:
         # Set interrupt state in thread state - the running graph will check this
@@ -407,6 +467,58 @@ def _handle_message(message: str, thread_ts: str, channel: str, client, say):
     threading.Thread(
         target=_run_agent,
         args=(message, thread_ts, channel, client, say),
+        daemon=True,
+    ).start()
+
+
+# ── Error Retry Handler ─────────────────────────────────────────────────────────
+
+@app.action("continue_after_error")
+def handle_continue_after_error(ack, body, client, say):
+    """Resume the agent after a transient service error."""
+    ack()
+    thread_ts = body["actions"][0]["value"]
+    channel_id = body["channel"]["id"]
+    
+    state = get_thread_state(thread_ts)
+    
+    # If the agent is already active, do nothing
+    if state.active:
+        try:
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text="⚠️ The agent is already running. Please wait for it to finish or send a new message."
+            )
+        except Exception:
+            pass
+        return
+    
+    # Ensure there's a pending retry
+    if not state.retry_message:
+        try:
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text="✅ No pending error to retry."
+            )
+        except Exception:
+            pass
+        return
+    
+    # Retrieve and clear retry state
+    message = state.retry_message
+    state.retry_message = ""
+    state.last_error = ""
+    state.retry_config = None
+    
+    # Prepare fresh cancellation event
+    state.cancel_event = threading.Event()
+    
+    # Start a fresh retry thread
+    threading.Thread(
+        target=_run_agent,
+        args=(message, thread_ts, channel_id, client, say, True),
         daemon=True,
     ).start()
 

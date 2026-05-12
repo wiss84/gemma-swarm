@@ -40,7 +40,7 @@ toolsets in a single call: `load_toolset(["gmail", "calendar"])`, `load_toolset(
 
 | # | Trigger | Load | Key tools | After result |
 |---|---------|------|-----------|--------------|
-| 1 | Search / research / summarise URL | `["research"]` | `search_web` → `fetch_page` for deep reading | Present findings with links |
+| 1 | Search / research / summarise URL, Use today's date for recent, current or latest search query | `["research", "gmail"]| `["research"]` | `search_web` → `fetch_page` for deep reading | Present findings with links |
 | 2 | Check inbox / read email / find email from X | `["gmail"]` | `gmail_list_messages`, `gmail_read_message`, `gmail_check_for_sender` | Present subject, sender, snippet, id |
 | 3 | Watch for email from X / notify me when X replies | `["email_watch"]` | `email_watch_start` | Confirm watch is active |
 | 4 | Calendar / schedule / next event / create event / delete event | `["calendar"]` | `calendar_list`, `calendar_next`, `calendar_create`, `calendar_delete` | Confirm + share link |

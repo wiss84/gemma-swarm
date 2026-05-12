@@ -5,7 +5,7 @@
 # ── Core LangChain / LangGraph ─────────────────────────────────────────────────
 langgraph>=1.0.0
 langchain-core>=1.2.0
-langchain-google-genai>=4.0.0
+langchain-google-genai>=4.2.1
 
 # ── LangGraph Checkpointing ────────────────────────────────────────────────────
 langgraph-checkpoint-sqlite>=2.0.0

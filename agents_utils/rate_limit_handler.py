@@ -3,12 +3,11 @@ Rate Limit Handler for Gemini and Gemma Models
 ===============================================
 Handles per-model rate limiting with:
 - Proactive delay before hitting limits
-- Reactive retry on 429 errors
+- Reactive retry on 429/503/500 errors with exponential backoff
 - Tracks requests/min, tokens/min, requests/day independently per model
-- Tracks cumulative context window usage per conversation
 - Persists daily request counts to a single JSON file (one entry per model)
   so daily quota survives app restarts and resets at calendar midnight
-- Auto-detects model family (Gemini vs Gemma) and applies appropriate limits
+- Auto-detects model family (Gemini vs Gemma 4) and applies appropriate limits
 """
 
 import os
@@ -19,15 +18,10 @@ import logging
 from collections import deque
 from datetime import datetime
 from typing import Callable, Any
-from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
+from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, InternalServerError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Custom exception for Gemini fallback trigger
-class GeminiFallbackRequired(Exception):
-    """Raised when Gemini model needs to fallback to Gemma."""
-    pass
 
 # Single shared file for all models
 PERSISTENCE_FILE = "rate_limit_state.json"
@@ -39,13 +33,6 @@ GEMINI_RATE_LIMITS = {
     "requests_per_minute": 15,
     "tokens_per_minute":   250000,
     "requests_per_day":    500,
-}
-
-# Gemma 3 model rate limits (free tier)
-GEMMA_3_RATE_LIMITS = {
-    "requests_per_minute": 30,
-    "tokens_per_minute":   15000,
-    "requests_per_day":    14400,
 }
 
 # Gemma 4 model rate limits (free tier)
@@ -65,7 +52,7 @@ def get_rate_limits(model_name: str) -> dict:
     doesn't matter and future model families won't silently inherit wrong limits.
 
     Args:
-        model_name: Model identifier (e.g., "gemma-4-31b-it", "gemma-3-27b-it")
+        model_name: Model identifier (e.g., "gemma-4-31b-it", "gemini-1.5-pro")
 
     Returns:
         dict with keys: requests_per_minute, tokens_per_minute, requests_per_day
@@ -74,37 +61,18 @@ def get_rate_limits(model_name: str) -> dict:
         return GEMINI_RATE_LIMITS.copy()
     elif model_name.startswith("gemma-4-"):
         return GEMMA_4_RATE_LIMITS.copy()
-    elif model_name.startswith("gemma-3-") or model_name.startswith("gemma-3n-"):
-        return GEMMA_3_RATE_LIMITS.copy()
     else:
-        # Unknown model — default to Gemma 3 limits and log a warning
+        # Unknown model — default to Gemma 4 limits and log a warning
         logger.warning(
             f"[rate_limit_handler] Unrecognised model '{model_name}' — "
-            f"defaulting to Gemma 3 rate limits. Add explicit limits if needed."
+            f"defaulting to Gemma 4 rate limits. Add explicit limits if needed."
         )
-        return GEMMA_3_RATE_LIMITS.copy()
-
-
-# ── Gemini Fallback Tracking (per session) ─────────────────────────────────────
-_gemini_fallback_used = False
-_gemini_fallback_agents = []
-
-
-def _is_daily_limit_exhaustion(error_message: str) -> bool:
-    error_str = str(error_message).upper()
-    return "QUOTA" in error_str or "RESOURCE_EXHAUSTED" in error_str or "RATE_LIMIT" in error_str
-
-
-def get_gemini_fallback_status() -> dict:
-    return {
-        "fallback_used": _gemini_fallback_used,
-        "agents_affected": _gemini_fallback_agents.copy(),
-    }
+        return GEMMA_4_RATE_LIMITS.copy()
 
 
 class RateLimitHandler:
     """
-    Manages rate limiting for Gemini and Gemma models.
+    Manages rate limiting for Gemini and Gemma 4 models.
 
     Rate limits are auto-detected based on model name prefix:
 
@@ -117,11 +85,6 @@ class RateLimitHandler:
             - 15 requests / minute
             - Unlimited tokens / minute (10M used as practical ceiling)
             - 1,500 requests / day
-
-        Gemma 3 models (free tier):
-            - 30 requests / minute
-            - 15,000 tokens / minute
-            - 14,400 requests / day
 
     Daily request count is persisted to a single shared JSON file.
     The counter resets automatically when the calendar date changes.
@@ -143,6 +106,7 @@ class RateLimitHandler:
         self.max_retries_service_unavailable = max_retries_service_unavailable if max_retries_service_unavailable is not None else max_retries
         self.base_backoff = base_backoff
         self.on_wait: Callable | None = None
+        self.on_retry: Callable[[str, float, Exception], None] | None = None
 
         if requests_per_minute is None or tokens_per_minute is None or requests_per_day is None:
             detected_limits = get_rate_limits(model_name)
@@ -306,8 +270,6 @@ class RateLimitHandler:
         input_tokens: int = 0,
         **kwargs,
     ) -> Any:
-        global _gemini_fallback_used, _gemini_fallback_agents
-
         tpm_check_tokens = input_tokens if input_tokens > 0 else estimated_tokens
         last_exception   = None
         service_unavailable_attempts = 0
@@ -324,19 +286,6 @@ class RateLimitHandler:
                 last_exception = e
                 error_str      = str(e)
 
-                if (self.model_name.startswith("gemini-") and
-                        _is_daily_limit_exhaustion(error_str) and
-                        not _gemini_fallback_used):
-                    logger.error(
-                        f"[{self.model_name}] Daily quota exhausted. "
-                        f"Triggering Gemini→Gemma fallback."
-                    )
-                    _gemini_fallback_used = True
-                    _gemini_fallback_agents.append(self.model_name)
-                    raise GeminiFallbackRequired(
-                        f"Gemini daily quota exhausted for {self.model_name}."
-                    )
-
                 google_delay = self._parse_retry_delay(error_str)
                 backoff      = google_delay if google_delay else self.base_backoff * (2 ** attempt)
                 logger.warning(
@@ -350,29 +299,28 @@ class RateLimitHandler:
                         pass
                 time.sleep(backoff)
 
-            except ServiceUnavailable as e:
+            except (ServiceUnavailable, InternalServerError) as e:
                 last_exception = e
                 service_unavailable_attempts += 1
 
                 if service_unavailable_attempts >= self.max_retries_service_unavailable:
                     logger.error(
-                        f"[{self.model_name}] ServiceUnavailable retries exhausted "
+                        f"[{self.model_name}] {type(e).__name__} retries exhausted "
                         f"({service_unavailable_attempts}/{self.max_retries_service_unavailable})."
                     )
-                    if self.model_name.startswith("gemini-") and not _gemini_fallback_used:
-                        _gemini_fallback_used = True
-                        _gemini_fallback_agents.append(self.model_name)
-                        raise GeminiFallbackRequired(
-                            f"Gemini ServiceUnavailable exhausted for {self.model_name}."
-                        )
                     raise last_exception
 
                 backoff = self.base_backoff * (2 ** attempt)
                 logger.warning(
-                    f"[{self.model_name}] ServiceUnavailable on attempt "
+                    f"[{self.model_name}] {type(e).__name__} on attempt "
                     f"{service_unavailable_attempts}/{self.max_retries_service_unavailable}. "
                     f"Backing off {backoff:.1f}s."
                 )
+                if self.on_retry:
+                    try:
+                        self.on_retry(self.model_name, backoff, e)
+                    except Exception:
+                        pass
                 time.sleep(backoff)
 
             except Exception as e:
