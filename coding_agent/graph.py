@@ -23,6 +23,7 @@ Checkpointing:
 Public interface:
     get_coding_graph()                    — returns the compiled graph (singleton)
     run_coding_session(prompt, ...)       — invoke entry point used by Slack handler
+    set_stream_manager(session_id, sm)    — attach a StreamManager for live UI cards
 """
 
 import logging
@@ -38,15 +39,16 @@ from agents_utils.config import LANGGRAPH_RECURSION_LIMIT
 logger = logging.getLogger(__name__)
 
 # ── Cancel-event registry ─────────────────────────────────────────────────────
-# Maps session_id → threading.Event so coding_agent_node can check for cancellation
-# without putting a non-serialisable object in LangGraph state.
 _cancel_events: dict = {}
 _cancel_events_lock = threading.Lock()
 
-# Status-callback registry ──────────────────────────────────────────────────────
-# Maps session_id → callable so coding_agent_node can inject Slack status updates.
+# ── Status-callback registry ──────────────────────────────────────────────────
 _status_callbacks: dict = {}
 _status_callbacks_lock = threading.Lock()
+
+# ── StreamManager registry ────────────────────────────────────────────────────
+_stream_managers: dict = {}
+_stream_managers_lock = threading.Lock()
 
 
 def register_cancel_event(session_id: str, event: threading.Event):
@@ -79,14 +81,23 @@ def get_status_callback(session_id: str) -> "callable | None":
         return _status_callbacks.get(session_id)
 
 
+def set_stream_manager(session_id: str, sm):
+    """Attach (or detach when sm=None) a StreamManager to a coding session."""
+    with _stream_managers_lock:
+        if sm is None:
+            _stream_managers.pop(session_id, None)
+        else:
+            _stream_managers[session_id] = sm
+
+
+def get_stream_manager(session_id: str):
+    with _stream_managers_lock:
+        return _stream_managers.get(session_id)
+
+
 # ── Node: coding_agent ────────────────────────────────────────────────────────
 
 def coding_agent_node(state: CodingAgentState) -> dict:
-    """
-    Run the CodingAgent tool loop for one invocation.
-    No message labels — the coding agent is a single-agent loop with no
-    supervisor routing, so HUMAN/CODING AGENT labels are pure token waste.
-    """
     workspace_path      = state.get("workspace_path", "")
     session_id          = state.get("session_id", "")
     cancel_event        = get_cancel_event(session_id) if session_id else None
@@ -100,9 +111,23 @@ def coding_agent_node(state: CodingAgentState) -> dict:
         agent_notes_enabled=agent_notes_enabled,
         status_callback=status_callback,
     )
-    # Inject session_id so base_agent._call_llm can record token activity
     agent._current_session_id   = session_id
     agent._current_project_name = f"coding\\{state.get('project_name', '')}"
+
+    # Attach StreamManager if one is registered for this session
+    agent.stream_manager = get_stream_manager(session_id)
+
+    # Inject rate-limit callbacks so Slack gets countdown messages on 429/500/503
+    try:
+        from slack_utils.handlers_coding import get_coding_rate_callback, get_coding_retry_callback
+        wait_cb  = get_coding_rate_callback()
+        retry_cb = get_coding_retry_callback()
+        if wait_cb:
+            agent.rate_limiter.on_wait  = wait_cb
+        if retry_cb:
+            agent.rate_limiter.on_retry = retry_cb
+    except Exception as _cb_err:
+        logger.debug(f"[coding_agent_node] Could not inject rate callbacks: {_cb_err}")
 
     result_text, parsed = agent.run(
         messages=state.get("messages", []),
@@ -123,10 +148,6 @@ def coding_agent_node(state: CodingAgentState) -> dict:
 
     updated_messages = list(state.get("messages", [])) + [AIMessage(content=result_text)]
 
-    # task_complete is signalled via the parsed dict returned by base_agent
-    # when TASK_COMPLETE appeared in a tool result during this run.
-    # We do NOT wipe messages here — output_node still needs them.
-    # The reset happens in reset_node, after output_node has captured the response.
     task_complete = bool(parsed and parsed.get("task_complete"))
     if task_complete:
         logger.info("[coding_agent_node] TASK_COMPLETE detected")
@@ -141,13 +162,6 @@ def coding_agent_node(state: CodingAgentState) -> dict:
 # ── Node: output_node ─────────────────────────────────────────────────────────
 
 def output_node(state: CodingAgentState) -> dict:
-    """
-    Format the agent's final response for posting to Slack.
-    - Strips any JSON wrapper ({"response": "..."}) the model may still emit
-    - Converts markdown to Slack mrkdwn format (headings, bold, italic, etc.)
-    - Splits long messages into Slack-safe chunks
-    - Filters out thinking blocks from Gemma 4's structured responses
-    """
     from agents_utils.json_parser import _extract_json
     from nodes.output_formatter import _markdown_to_slack, _strip_labels, _build_formatted_output
 
@@ -158,7 +172,6 @@ def output_node(state: CodingAgentState) -> dict:
         for msg in reversed(messages):
             if isinstance(msg, AIMessage):
                 raw = msg.content
-                # If content is a list of blocks (Gemma 4), extract text only, skip thinking
                 if isinstance(raw, list):
                     text_parts = []
                     for block in raw:
@@ -175,8 +188,6 @@ def output_node(state: CodingAgentState) -> dict:
                     summary = raw if isinstance(raw, str) else str(raw)
                 break
 
-    # If the model returned {"response": "..."} despite native tool calling,
-    # unwrap it so the user sees clean text, not raw JSON.
     if summary:
         parsed = _extract_json(summary)
         if parsed and "response" in parsed:
@@ -185,10 +196,7 @@ def output_node(state: CodingAgentState) -> dict:
     if not summary or not summary.strip():
         return {"formatted_output": ["Coding task completed. No output was generated."]}
 
-    # Clean internal labels
     clean = _strip_labels(summary)
-
-    # Convert markdown → mrkdwn; extract table block if present
     slack_text, table_block = _markdown_to_slack(clean)
     formatted_output        = _build_formatted_output(slack_text, table_block)
 
@@ -204,28 +212,16 @@ def output_node(state: CodingAgentState) -> dict:
 # ── Routing ───────────────────────────────────────────────────────────────────
 
 def _route_after_coding_agent(state: CodingAgentState) -> str:
-    """Route to output if agent produced a response; skip to END if cancelled."""
     if not state.get("task_summary", "") and not state.get("task_complete", False):
-        return "end"  # cancelled
+        return "end"
     return "output"
 
 
 # ── Node: reset_node ──────────────────────────────────────────────────────────
 
 def reset_node(state: CodingAgentState) -> dict:
-    """
-    Runs after output_node. Snapshots context usage, then wipes the message
-    history when a task was completed (task_complete=True) so the next task
-    starts with a clean context window.
-
-    output_node has already captured the response in formatted_output
-    before this runs, so wiping messages here is safe — the Slack
-    response is completely unaffected.
-    """
     task_complete = state.get("task_complete", False)
 
-    # ── Context usage snapshot (always, not just on task_complete) ────────────
-    # Import here to avoid circular imports at module load time.
     try:
         from coding_agent.prompts.main_agent_prompt import get_system_prompt
         system_prompt = get_system_prompt(
@@ -248,7 +244,6 @@ def reset_node(state: CodingAgentState) -> dict:
 
     if task_complete:
         logger.info("[reset_node] Task complete — wiping message history for next task")
-        # Also reset token activity so the chart starts fresh for the next task
         try:
             from agents_utils.token_activity_tracker import reset_session
             reset_session(state.get("session_id", ""))
@@ -288,17 +283,11 @@ _checkpointer = None
 
 
 def get_coding_graph():
-    """
-    Return the compiled CodingAgent graph. Singleton — built once per process.
-    Uses the same SqliteSaver checkpointer as the main graph.
-    """
     global _coding_graph, _checkpointer
     if _coding_graph is None:
         _checkpointer  = get_checkpointer()
         _coding_graph  = _build_coding_graph().compile(checkpointer=_checkpointer)
         logger.info("[coding_graph] Compiled successfully.")
-
-        # Sanity check — print ASCII graph in debug mode
         try:
             logger.debug(
                 "[coding_graph] Structure:\n"
@@ -306,7 +295,6 @@ def get_coding_graph():
             )
         except Exception:
             pass
-
     return _coding_graph
 
 
@@ -323,31 +311,12 @@ def run_coding_session(
     model_override:  str = "",
     agent_notes_enabled: bool = True,
 ) -> list[str] | None:
-    """
-    Invoke the coding agent graph for one user prompt.
-
-    Args:
-        prompt:          The user's coding request.
-        session_id:      Unique session ID — used as the LangGraph thread_id.
-                         Reusing the same session_id resumes a previous session.
-        workspace_path:  Absolute path to the project directory.
-        project_name:    Human-readable project name.
-        slack_thread_ts: Slack thread timestamp for posting status updates.
-        slack_channel:   Slack channel ID.
-        cancel_event:    Optional threading.Event — set it to interrupt mid-run.
-        model_override:  Optional model name to override the default coding_agent model.
-        agent_notes_enabled: Whether the agent can read/write learning notes.
-
-    Returns:
-        List of formatted output strings to post to Slack, or None if cancelled.
-    """
     graph  = get_coding_graph()
     config = {
         "configurable": {"thread_id": session_id},
-        "recursion_limit": LANGGRAPH_RECURSION_LIMIT,  # low limit for now, just for testing
+        "recursion_limit": LANGGRAPH_RECURSION_LIMIT,
     }
 
-    # Try to resume an existing session
     try:
         existing          = graph.get_state(config)
         existing_messages = existing.values.get("messages", []) if existing.values else []
@@ -355,19 +324,17 @@ def run_coding_session(
         existing_messages = []
 
     if existing_messages:
-        # Resume: append new message to existing history (no label prefix)
         input_state = {
-            "messages":       existing_messages + [HumanMessage(content=prompt)],
-            "workspace_path": workspace_path or existing.values.get("workspace_path", ""),
-            "slack_thread_ts": slack_thread_ts,
-            "slack_channel":   slack_channel,
-            "task_complete":   False,
-            "formatted_output": [],
-            "model_override":  model_override,
+            "messages":           existing_messages + [HumanMessage(content=prompt)],
+            "workspace_path":     workspace_path or existing.values.get("workspace_path", ""),
+            "slack_thread_ts":    slack_thread_ts,
+            "slack_channel":      slack_channel,
+            "task_complete":      False,
+            "formatted_output":   [],
+            "model_override":     model_override,
             "agent_notes_enabled": agent_notes_enabled,
         }
     else:
-        # New session — no label prefix on user message
         input_state = default_coding_state(
             workspace_path=workspace_path,
             project_name=project_name,
@@ -381,9 +348,6 @@ def run_coding_session(
 
     formatted_output = []
 
-    # Register the cancel_event so coding_agent_node can look it up by session_id.
-    # Also wire it into execute_shell so subprocesses are killed immediately on Stop
-    # rather than waiting for the full timeout.
     if cancel_event and session_id:
         register_cancel_event(session_id, cancel_event)
     from tools.coding_tools import set_shell_cancel_event
@@ -402,10 +366,10 @@ def run_coding_session(
 
     except Exception as e:
         logger.error(f"[coding_graph] Stream error for session {session_id}: {e}", exc_info=True)
-        return [f"Coding session error: {e}"]
+        raise
     finally:
         if session_id:
             unregister_cancel_event(session_id)
-        set_shell_cancel_event(None)  # clear so it doesn't leak into the next session
+        set_shell_cancel_event(None)
 
     return formatted_output if formatted_output else None

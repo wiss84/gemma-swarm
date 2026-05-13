@@ -31,6 +31,10 @@ class BaseAgent(ABC):
         self.tool_registry: dict   = {}
         self.llm_with_tools        = None
 
+        # Optional StreamManager — set externally before run() is called.
+        # When set, thinking blocks and tool calls are pushed to Slack live.
+        self.stream_manager = None
+
     @abstractmethod
     def get_system_prompt(self) -> str:
         pass
@@ -79,18 +83,37 @@ class BaseAgent(ABC):
             return f"Tool error: {e}"
 
     def _extract_response_content(self, response) -> str:
+        """Extract the text response only, discarding thinking blocks.
+        Use _extract_response_and_thinking() when thinking content is needed."""
+        text, _ = self._extract_response_and_thinking(response)
+        return text
+
+    def _extract_response_and_thinking(self, response) -> tuple[str, str]:
+        """
+        Extract both the text response and thinking content from an LLM response.
+
+        Returns
+        -------
+        (response_text, thinking_text)
+            thinking_text is an empty string if no thinking blocks were present.
+        """
         content = response.content
         if isinstance(content, str):
-            return content
+            return content, ""
         if isinstance(content, list):
-            parts = []
+            text_parts     = []
+            thinking_parts = []
             for block in content:
                 if isinstance(block, dict):
                     if block.get("type") == "thinking":
-                        continue
-                    parts.append(block.get("text", ""))
-            return "".join(parts) if parts else str(content)
-        return str(content)
+                        thinking_parts.append(block.get("thinking", ""))
+                    else:
+                        text_parts.append(block.get("text", ""))
+            return (
+                "".join(text_parts) if text_parts else str(content),
+                "\n\n".join(t for t in thinking_parts if t),
+            )
+        return str(content), ""
 
     def _call_llm(self, messages: list, use_tools: bool = False) -> AIMessage:
         total_chars  = sum(len(m.content) if isinstance(m.content, str) else len(str(m.content)) for m in messages)
@@ -104,9 +127,9 @@ class BaseAgent(ABC):
             input_tokens=input_tokens,
         )
 
-        raw          = self._extract_response_content(response)
-        session_id   = getattr(self, "_current_session_id", "")
-        project_name = getattr(self, "_current_project_name", "")
+        raw, thinking = self._extract_response_and_thinking(response)
+        session_id    = getattr(self, "_current_session_id", "")
+        project_name  = getattr(self, "_current_project_name", "")
 
         if session_id:
             record_token_event(session_id=session_id, event_type="llm_input",
@@ -126,6 +149,14 @@ class BaseAgent(ABC):
                 record_token_event(session_id=session_id, event_type="llm_output",
                                    token_count=estimate_tokens(raw),
                                    model=self.model_name, project_name=project_name)
+
+        # Push thinking to stream if available
+        if thinking and self.stream_manager:
+            try:
+                self.stream_manager.push_thinking(thinking)
+            except Exception as e:
+                logger.debug(f"[base_agent] push_thinking failed: {e}")
+
         return response
 
     def _run_tool_loop(self, llm_messages: list, max_iterations: int, cancel_event=None) -> tuple[str, dict | None]:
@@ -147,13 +178,23 @@ class BaseAgent(ABC):
                     if cancel_event and cancel_event.is_set():
                         return "[cancelled]", None
 
+                    # Legacy status callback (still used by supervisor for setStatus text)
                     if self.status_callback:
                         try:
                             self.status_callback(tool_name)
                         except Exception:
                             pass
 
+                    # Stream: push complete/error card only (no in_progress — Slack appends, not updates)
+                    task_id = None
+                    if self.stream_manager:
+                        try:
+                            task_id = self.stream_manager.next_tool_id()
+                        except Exception as e:
+                            logger.debug(f"[base_agent] next_tool_id failed: {e}")
+
                     tool_result = self._execute_tool(tool_name, tool_args)
+                    is_error    = tool_result.startswith("Error:") or tool_result.startswith("Tool error:")
 
                     session_id   = getattr(self, "_current_session_id", "")
                     project_name = getattr(self, "_current_project_name", "")
@@ -167,6 +208,19 @@ class BaseAgent(ABC):
 
                     if tool_name == "update_project_todo" and "__TASK_COMPLETE__" in tool_result:
                         task_complete_detected = True
+
+                    # Stream: push complete/error card
+                    if self.stream_manager and task_id:
+                        try:
+                            self.stream_manager.push_tool_end(
+                                task_id=task_id,
+                                tool_name=tool_name,
+                                tool_input=str(tool_args),
+                                tool_output=tool_result,
+                                error=is_error,
+                            )
+                        except Exception as e:
+                            logger.debug(f"[base_agent] push_tool_end failed: {e}")
 
                     llm_messages.append(ToolMessage(content=tool_result, tool_call_id=tool_id))
                 consecutive_empty = 0

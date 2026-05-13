@@ -133,8 +133,23 @@ def _edit_steps_in_file(todo_path: Path, indices: List[int]) -> None:
     Edits step checkboxes in-place in the ### Plan block.
     For each index, finds the step line and replaces its marker.
     A note is written only for single-step updates.
+
+    Scopes all replacements to the LAST ### Plan block in the file so that
+    step descriptions that appear in earlier (completed) tasks are not
+    accidentally matched instead of the active task's steps.
     """
     content = todo_path.read_text(encoding="utf-8")
+
+    # Find the start of the last ### Plan block
+    plan_matches = list(re.finditer(r"^### Plan$", content, re.MULTILINE))
+    if not plan_matches:
+        logger.warning("[todo_tools] _edit_steps_in_file: no ### Plan block found in file")
+        return
+    plan_start = plan_matches[-1].end()  # character index just after "### Plan"
+
+    prefix  = content[:plan_start]   # everything before (and including) ### Plan
+    section = content[plan_start:]   # the active plan block + anything after it
+
     for i in indices:
         desc = _current_steps[i]
         marker = _current_step_statuses[i]
@@ -142,14 +157,16 @@ def _edit_steps_in_file(todo_path: Path, indices: List[int]) -> None:
         new_line = f"- [{marker}] {desc}"
         if note:
             new_line += f" \u2014 {note}"
-        # Replace any existing marker variant for this step description,
-        # optionally followed by a note (" — ...") up to end of line.
         pattern = re.compile(
             r"- \[[x~! ]\] " + re.escape(desc) + r"(?: \u2014 [^\n]*)?",
             re.MULTILINE
         )
-        content = pattern.sub(new_line, content, count=1)
-    todo_path.write_text(content, encoding="utf-8")
+        new_section = pattern.sub(new_line, section, count=1)
+        if new_section == section:
+            logger.warning(f"[todo_tools] _edit_steps_in_file: step {i} '{desc}' not found in active plan block — skipping")
+        section = new_section
+
+    todo_path.write_text(prefix + section, encoding="utf-8")
 
 
 def _append_step_to_plan(todo_path: Path, step_desc: str) -> None:
@@ -163,10 +180,56 @@ def _append_step_to_plan(todo_path: Path, step_desc: str) -> None:
     if matches:
         last_match = matches[-1]
         insert_pos = last_match.end()
-        content = content[:insert_pos] + "\n" + new_line + content[insert_pos:]
+        # Normalize: strip any trailing newlines at the cut point, then add exactly one
+        content = content[:insert_pos].rstrip("\n") + "\n" + new_line + "\n" + content[insert_pos:].lstrip("\n")
     else:
         content = content.rstrip() + "\n" + new_line + "\n"
     todo_path.write_text(content, encoding="utf-8")
+
+
+def _recover_state_from_file() -> bool:
+    """
+    Recover in-memory task state from project_TODO.md after a process restart.
+    Called when _current_task_name is empty but an active task may exist in the file.
+    Returns True if recovery succeeded, False if no active task found.
+    """
+    global _current_task_name, _current_steps, _current_step_statuses
+    global _current_step_notes, _task_start_ts
+
+    todo_path = _todo_path()
+    if not todo_path.exists():
+        return False
+
+    content = todo_path.read_text(encoding="utf-8")
+
+    # Only recover if the last status line says In Progress
+    status_lines = re.findall(r"^### Status: (.+)$", content, re.MULTILINE)
+    if not status_lines or status_lines[-1].strip() != "In Progress":
+        return False
+
+    # Extract task name from the last ## ... | Task: ... header
+    header_matches = list(re.finditer(r"^## .+? \| Task: (.+)$", content, re.MULTILINE))
+    if not header_matches:
+        return False
+    _current_task_name = header_matches[-1].group(1).strip()
+
+    # Extract all step lines from the last ### Plan block
+    plan_matches = list(re.finditer(r"^### Plan$", content, re.MULTILINE))
+    if plan_matches:
+        plan_start = plan_matches[-1].end()
+        rest = content[plan_start:]
+        steps_raw = re.findall(r"^- \[([x~! ])\] (.+?)(?:\s*\u2014\s*(.+))?$", rest, re.MULTILINE)
+        _current_steps           = [s[1].strip() for s in steps_raw]
+        _current_step_statuses   = [s[0]         for s in steps_raw]
+        _current_step_notes      = [s[2].strip() if s[2] else "" for s in steps_raw]
+    else:
+        _current_steps           = []
+        _current_step_statuses   = []
+        _current_step_notes      = []
+
+    _task_start_ts = ""
+    logger.info(f"[todo_tools] Recovered task '{_current_task_name}' with {len(_current_steps)} steps from file after restart")
+    return True
 
 
 # -- Tool schema ---------------------------------------------------------------
@@ -345,10 +408,11 @@ def update_project_todo(
         # -- update_step -------------------------------------------------------
         elif operation == "update_step":
             if not _current_task_name:
-                return (
-                    "[update_project_todo error: no active task. "
-                    "Call start_task before update_step.]"
-                )
+                if not _recover_state_from_file():
+                    return (
+                        "[update_project_todo error: no active task. "
+                        "Call start_task before update_step.]"
+                    )
             if status not in ("x", "~", "!"):
                 return (
                     "[update_project_todo error: status must be 'x' (done), '~' (in progress), "
@@ -398,10 +462,11 @@ def update_project_todo(
         # -- add_step ----------------------------------------------------------
         elif operation == "add_step":
             if not _current_task_name:
-                return (
-                    "[update_project_todo error: no active task. "
-                    "Call start_task before add_step.]"
-                )
+                if not _recover_state_from_file():
+                    return (
+                        "[update_project_todo error: no active task. "
+                        "Call start_task before add_step.]"
+                    )
             # Guard: validate before calling .strip() — step_description may be a list
             is_empty = (
                 not step_description
@@ -438,14 +503,17 @@ def update_project_todo(
         # -- complete_task -----------------------------------------------------
         elif operation == "complete_task":
             if not _current_task_name:
-                return (
-                    "[update_project_todo error: no active task. "
-                    "Call start_task before complete_task.]"
-                )
-            # Guard: block if any steps are still unmarked [ ]
+                if not _recover_state_from_file():
+                    return (
+                        "[update_project_todo error: no active task. "
+                        "Call start_task before complete_task.]"
+                    )
+            # Guard: block if any steps in the ACTIVE plan block are still unmarked [ ]
             if todo_path.exists():
                 file_content = todo_path.read_text(encoding="utf-8")
-                if re.search(r"- \[ \] ", file_content):
+                plan_matches = list(re.finditer(r"^### Plan$", file_content, re.MULTILINE))
+                active_section = file_content[plan_matches[-1].end():] if plan_matches else file_content
+                if re.search(r"- \[ \] ", active_section):
                     return (
                         "[update_project_todo: There are still incomplete steps marked as [ ]. "
                         "Please mark all steps using operation='update_step' "

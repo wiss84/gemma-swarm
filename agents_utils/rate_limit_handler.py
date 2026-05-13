@@ -20,6 +20,27 @@ from datetime import datetime
 from typing import Callable, Any
 from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, InternalServerError
 
+# google-genai SDK raises its own error hierarchy (google.genai.errors),
+# which is separate from google-api-core. We need to catch both.
+try:
+    from google.genai.errors import ServerError as _GenaiServerError
+    from google.genai.errors import ClientError as _GenaiClientError
+except ImportError:
+    _GenaiServerError = None
+    _GenaiClientError = None
+
+# Build tuples used in except clauses — filter out None in case of import failure
+_SERVER_ERRORS = tuple(e for e in (
+    ServiceUnavailable,
+    InternalServerError,
+    _GenaiServerError,
+) if e is not None)
+
+_RATE_ERRORS = tuple(e for e in (
+    ResourceExhausted,
+    _GenaiClientError,  # 429s from genai SDK surface as ClientError with status 429
+) if e is not None)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -282,7 +303,7 @@ class RateLimitHandler:
                 self._record_request(estimated_tokens)
                 return result
 
-            except ResourceExhausted as e:
+            except _RATE_ERRORS as e:
                 last_exception = e
                 error_str      = str(e)
 
@@ -299,7 +320,7 @@ class RateLimitHandler:
                         pass
                 time.sleep(backoff)
 
-            except (ServiceUnavailable, InternalServerError) as e:
+            except _SERVER_ERRORS as e:
                 last_exception = e
                 service_unavailable_attempts += 1
 

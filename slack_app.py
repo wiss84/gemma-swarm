@@ -22,7 +22,7 @@ from langchain_core.messages import HumanMessage
 load_dotenv()
 
 from agents_utils.graph import set_slack_client, get_graph
-from agents.supervisor_agent import set_tool_status_callback, clear_tool_status_callback
+from agents.supervisor_agent import set_tool_status_callback, clear_tool_status_callback, get_supervisor_agent
 from agents_utils.state import default_state
 from agents_utils.config import (
     LANGGRAPH_RECURSION_LIMIT,
@@ -51,6 +51,7 @@ from slack_utils.handlers_autonomous import register_autonomous_handlers
 from slack_utils.handlers_preferences import register_preferences_handlers
 from slack_utils.handlers_google    import register_google_handlers
 from slack_utils.handlers_coding    import register_coding_handlers, run_coding_session_slack
+from slack_utils.stream_manager     import StreamManager
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
@@ -68,6 +69,7 @@ logger = logging.getLogger(__name__)
 
 app = App(token=os.environ["Bot_User_OAuth_Token"])
 BOT_USER_ID = None
+TEAM_ID     = None  # set at startup via auth_test
 
 
 
@@ -83,8 +85,8 @@ def _strip_slack_formatting(text: str) -> str:
 def _run_agent(message: str, thread_ts: str, channel: str, client, say, _is_retry: bool = False):
     """
     Core worker. Runs in a background thread.
-    Posts a single tool-status message that updates per tool call.
-    Posts the final response when done.
+    Opens a Slack stream for live thinking/tool cards via StreamManager.
+    Posts the final response when done via existing output_formatter mechanism.
     """
     state        = get_thread_state(thread_ts)
     state.active = True
@@ -100,22 +102,21 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say, _is_retr
         "recursion_limit": LANGGRAPH_RECURSION_LIMIT,
     }
 
-    # Single tool-status message, updated per tool call (like coding agent)
-    _tool_status_ts: dict = {"ts": None}
+    # ── Stream manager: live thinking + tool cards ─────────────────────────
+    stream_manager = StreamManager(client, channel, thread_ts, user_id=state.user_id)
+    stream_manager.open()
 
+    # Attach to supervisor so it pushes cards automatically
+    supervisor = get_supervisor_agent()
+    supervisor.stream_manager = stream_manager
+
+    # Cycle the animated status text as each tool runs
     def tool_status_fn(tool_name: str):
         if tool_name == "thinking":
-            text = "🧠 Thinking..."
+            stream_manager.set_status("🧠 Thinking...")
         else:
-            text = f"🔧 Using: `{tool_name}`"
-        try:
-            if _tool_status_ts["ts"]:
-                update_status(client, channel, _tool_status_ts["ts"], text)
-            else:
-                ts = post_status(client, channel, thread_ts, text)
-                _tool_status_ts["ts"] = ts
-        except Exception as e:
-            logger.debug(f"[slack] Tool status update failed: {e}")
+            readable = tool_name.replace("_", " ").title()
+            stream_manager.set_status(f"🔧 {readable}")
 
     set_tool_status_callback(tool_status_fn)
 
@@ -134,21 +135,17 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say, _is_retr
 
         for chunk in compiled_graph.stream(input_state, config, stream_mode="updates"):
 
-            # Check for interrupt - either cancel event OR interrupt_pending flag
             if state.cancel_event.is_set():
                 logger.info(f"[slack] Cancelled: {thread_ts}")
                 break
-            
-            # Check if interrupt message was received while running
+
             if getattr(state, 'interrupt_pending', False):
                 logger.info(f"[slack] Interrupt detected while running: {thread_ts}")
-                # Pause here and show interrupt buttons
                 from nodes.human_gate import human_gate_node
-                
+
                 interrupt_msg = state.interrupt_message
                 channel = state.active_channel or channel
-                
-                # Build interrupt state and call human_gate to show buttons
+
                 interrupt_state = {
                     "slack_thread_ts": thread_ts,
                     "slack_channel": channel,
@@ -160,50 +157,37 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say, _is_retr
                     "linkedin_draft": {},
                     "active_agent": "",
                 }
-                
+
                 try:
-                    result = human_gate_node(interrupt_state, client=client)
+                    result   = human_gate_node(interrupt_state, client=client)
                     decision = result.get("human_decision", "rejected")
                     logger.info(f"[slack] Interrupt decision: {decision}")
-                    
-                    # Handle the decision
+
                     if decision == "rejected":
-                        # Queue - clear interrupt and continue
                         state.interrupt_pending = False
                         state.interrupt_message = ""
-                        # Continue running...
-                    elif decision == "combine":
-                        # Combine - handled by button handler, cancel this task
-                        state.cancel_event.set()
-                        break
-                    elif decision == "fresh_start":
-                        # Fresh start - handled by button handler, cancel this task
+                    elif decision in ("combine", "fresh_start"):
                         state.cancel_event.set()
                         break
                 except Exception as e:
                     logger.error(f"[slack] Error in interrupt handling: {e}")
                     state.interrupt_pending = False
                     state.interrupt_message = ""
-            
+
             for node_name, node_output in chunk.items():
                 if node_name == "output_formatter":
                     formatted_output = node_output.get("formatted_output", [])
 
     except Exception as e:
         logger.error(f"[slack] Agent error: {e}")
-        
-        # Store error info for retry
-        state.last_error = str(e)
+
+        state.last_error   = str(e)
         state.retry_config = config
         state.retry_message = message
-        
-        # Build error message with Continue button
-        error_text = f"❌ An error occurred: `{e}`"
+
+        error_text    = f"❌ An error occurred: `{e}`"
         button_blocks = [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": error_text}
-            },
+            {"type": "section", "text": {"type": "mrkdwn", "text": error_text}},
             {
                 "type": "actions",
                 "elements": [
@@ -212,26 +196,24 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say, _is_retr
                         "text": {"type": "plain_text", "text": "🔄 Continue", "emoji": True},
                         "action_id": "continue_after_error",
                         "value": thread_ts,
-                        "style": "primary"
+                        "style": "primary",
                     }
-                ]
-            }
+                ],
+            },
         ]
-        
+
         try:
             client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                blocks=button_blocks,
-                mrkdwn=True
+                channel=channel, thread_ts=thread_ts,
+                blocks=button_blocks, mrkdwn=True,
             )
         except Exception as post_err:
             logger.error(f"[slack] Could not post error with button: {post_err}")
-            # Fallback to simple text message
             formatted_output = [f"❌ An error occurred: {e}"]
 
     finally:
-        delete_status(client, channel, _tool_status_ts["ts"] or "")
+        stream_manager.close()
+        supervisor.stream_manager = None
         clear_tool_status_callback()
         clear_wait_callbacks()
         clear_retry_callbacks()
@@ -240,15 +222,10 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say, _is_retr
 
     if not state.cancel_event.is_set():
         if formatted_output:
-            # formatted_output is list[str | dict]:
-            #   str  → plain mrkdwn text chunk
-            #   dict → Slack Block Kit table block (paired with preceding text if any)
             pending_text: str | None = None
 
             for item in formatted_output:
                 if isinstance(item, dict):
-                    # Block Kit block (table, section, etc.)
-                    # Flush any pending text first as a separate message
                     if pending_text is not None:
                         try:
                             client.chat_postMessage(channel=channel, thread_ts=thread_ts,
@@ -256,7 +233,7 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say, _is_retr
                         except Exception as e:
                             logger.error(f"[slack] Could not post chunk: {e}")
                         pending_text = None
-                    block_type   = item.get("type", "block")
+                    block_type    = item.get("type", "block")
                     text_fallback = item.get("text", {}).get("text", "")[:500].strip() or "See attached content."
                     logger.info(f"[slack] Posting {block_type} block")
                     try:
@@ -265,145 +242,96 @@ def _run_agent(message: str, thread_ts: str, channel: str, client, say, _is_retr
                     except Exception as e:
                         logger.error(f"[slack] Could not post block: {e}")
                 else:
-                    # Text chunk — hold it; it may be followed by a table block
                     if pending_text is not None:
                         is_code = "```" in pending_text
                         logger.info(f"[slack] Posting pending text: {len(pending_text)} chars, is_code={is_code}")
                         try:
-                            client.chat_postMessage(
-                                channel=channel,
-                                thread_ts=thread_ts,
-                                text=pending_text,
-                                mrkdwn=True,
-                            )
+                            client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                                    text=pending_text, mrkdwn=True)
                         except Exception as e:
                             logger.error(f"[slack] Could not post chunk: {e}")
                     pending_text = item
 
-            # Flush any remaining text chunk not followed by a table
             if pending_text is not None:
                 is_code = "```" in pending_text
                 logger.info(f"[slack] Flushing pending text: {len(pending_text)} chars, is_code={is_code}, preview: {pending_text[:80]!r}")
                 try:
-                    client.chat_postMessage(
-                        channel=channel,
-                        thread_ts=thread_ts,
-                        text=pending_text,
-                        mrkdwn=True,
-                    )
+                    client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                            text=pending_text, mrkdwn=True)
                 except Exception as e:
                     logger.error(f"[slack] Could not post chunk: {e}")
         else:
             try:
                 client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
+                    channel=channel, thread_ts=thread_ts,
                     text="⚠️ I wasn't able to generate a response. Please hold on or try again in a moment.",
                 )
             except Exception:
                 pass
 
-    # Check for interrupt action after task completes
-    # Route to human_gate to show interrupt buttons
     if getattr(state, 'interrupt_pending', False) and not state.cancel_event.is_set():
         from nodes.human_gate import human_gate_node
-        
+
         interrupt_msg = state.interrupt_message
-        channel = state.active_channel or channel
-        
-        # Clear the is_interrupted flag in graph state
+        channel       = state.active_channel or channel
+
         try:
-            graph = get_graph()
+            graph  = get_graph()
             config = {"configurable": {"thread_id": state.active_thread_id}}
-            graph.update_state(config, {"is_interrupted": False}, )
+            graph.update_state(config, {"is_interrupted": False})
         except Exception as e:
             logger.error(f"[slack] Could not clear interrupt flag: {e}")
-        
-        # Register for confirmation and show interrupt buttons via human_gate
+
         try:
-            # Build state for human_gate
             interrupt_state = {
-                "slack_thread_ts": thread_ts,
-                "slack_channel": channel,
-                "is_interrupted": True,
-                "interrupt_message": interrupt_msg,
-                "messages": [],
-                "pending_confirmation": "",
-                "email_draft": {},
-                "linkedin_draft": {},
-                "active_agent": "",
+                "slack_thread_ts": thread_ts, "slack_channel": channel,
+                "is_interrupted": True, "interrupt_message": interrupt_msg,
+                "messages": [], "pending_confirmation": "",
+                "email_draft": {}, "linkedin_draft": {}, "active_agent": "",
             }
-            
-            # Call human_gate_node directly to show buttons and wait for decision
-            result = human_gate_node(interrupt_state, client=client)
-            
-            # Get the decision from the result
+            result   = human_gate_node(interrupt_state, client=client)
             decision = result.get("human_decision", "rejected")
-            
             logger.info(f"[slack] Interrupt decision: {decision}")
-            
-            # Handle based on decision
+
             if decision == "rejected":
-                # Queue - continue with current task (which already completed)
-                # Just process any queued messages
                 queued_msgs = getattr(state, 'queued_messages', [])
                 if queued_msgs and not state.cancel_event.is_set():
                     next_msg = queued_msgs.pop(0)
-                    state.queued_messages = queued_msgs
+                    state.queued_messages  = queued_msgs
                     state.interrupt_pending = False
                     state.interrupt_message = ""
-                    state.cancel_event = threading.Event()
+                    state.cancel_event      = threading.Event()
                     logger.info(f"[slack] Running queued message. Remaining: {len(state.queued_messages)}")
                     _run_agent(next_msg, thread_ts, channel, client, say)
                 else:
                     state.interrupt_pending = False
                     state.interrupt_message = ""
                 return
-            elif decision == "combine":
-                # Combine - the button handler already set up the new thread
-                # Just need to start the new thread with combined message
-                # The interrupt_action should be stored in state
-                state.interrupt_pending = False
-                state.interrupt_message = ""
-                # The combine handler in handlers_interrupt.py handles starting new thread
-                # But we need to trigger it - check if new thread was created
-                new_thread_id = state.active_thread_id
-                if new_thread_id and new_thread_id != getattr(state, 'old_thread_id', None):
-                    # New thread created by button handler - run on it
-                    logger.info(f"[slack] Combine: running on new thread {new_thread_id}")
-                return
-            elif decision == "fresh_start":
-                # Fresh start - the button handler already created new thread and runs it
-                # Just clear state
+            elif decision in ("combine", "fresh_start"):
                 state.interrupt_pending = False
                 state.interrupt_message = ""
                 return
             else:
-                # Default - treat as queue
                 state.interrupt_pending = False
                 state.interrupt_message = ""
-                
         except Exception as e:
             logger.error(f"[slack] Error showing interrupt buttons: {e}")
-            # Fallback to queue behavior
             state.interrupt_pending = False
             state.interrupt_message = ""
         return
 
-    # Process queued messages one by one
     queued_msgs = getattr(state, 'queued_messages', [])
     if queued_msgs and not state.cancel_event.is_set():
-        # Get and remove the first message from queue
         next_msg = queued_msgs.pop(0)
-        state.queued_messages = queued_msgs  # Update the list
-        state.cancel_event = threading.Event()
+        state.queued_messages = queued_msgs
+        state.cancel_event    = threading.Event()
         logger.info(f"[slack] Running queued message. Remaining: {len(state.queued_messages)}")
         _run_agent(next_msg, thread_ts, channel, client, say)
 
 
 def _build_input_state(message, state, slack_thread_ts, slack_channel, compiled_graph, config, is_retry: bool = False):
     """Build input state for graph.stream().
-    
+
     Args:
         is_retry: If True, returns the existing checkpoint state unchanged
                   (no new HumanMessage is appended). Used to resume after errors.
@@ -416,14 +344,12 @@ def _build_input_state(message, state, slack_thread_ts, slack_channel, compiled_
 
     if existing_vals:
         if is_retry:
-            # Resume from the last checkpoint; do not modify state
             return existing_vals
         else:
-            # New user message — append to existing conversation
             msgs = existing_vals.get("messages", []) + [HumanMessage(content=message)]
             return {
                 **existing_vals,
-                "messages": msgs,
+                "messages":         msgs,
                 "slack_thread_ts":  slack_thread_ts,
                 "slack_channel":    slack_channel,
                 "task_complete":    False,
@@ -442,24 +368,19 @@ def _build_input_state(message, state, slack_thread_ts, slack_channel, compiled_
         return s
 
 
-
 def _handle_message(message: str, thread_ts: str, channel: str, client, say):
     """Handle incoming message — interrupt or run directly."""
     state = get_thread_state(thread_ts)
-    
-    # Clear any pending error retry state — fresh user intent
+
     state.retry_message = ""
-    state.last_error = ""
-    state.retry_config = None
+    state.last_error    = ""
+    state.retry_config  = None
 
     if state.active:
-        # Set interrupt state in thread state - the running graph will check this
-        # in its streaming loop and pause to show interrupt buttons
         state.interrupt_pending = True
         state.interrupt_message = message
-        state.interrupt_action = ""
-        state.active_channel = channel
-        
+        state.interrupt_action  = ""
+        state.active_channel    = channel
         logger.info(f"[slack] Interrupt pending for thread {thread_ts}: {message[:50]}")
         return
 
@@ -477,45 +398,37 @@ def _handle_message(message: str, thread_ts: str, channel: str, client, say):
 def handle_continue_after_error(ack, body, client, say):
     """Resume the agent after a transient service error."""
     ack()
-    thread_ts = body["actions"][0]["value"]
+    thread_ts  = body["actions"][0]["value"]
     channel_id = body["channel"]["id"]
-    
+
     state = get_thread_state(thread_ts)
-    
-    # If the agent is already active, do nothing
+
     if state.active:
         try:
             client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text="⚠️ The agent is already running. Please wait for it to finish or send a new message."
+                channel=channel_id, thread_ts=thread_ts,
+                text="⚠️ The agent is already running. Please wait for it to finish or send a new message.",
             )
         except Exception:
             pass
         return
-    
-    # Ensure there's a pending retry
+
     if not state.retry_message:
         try:
             client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text="✅ No pending error to retry."
+                channel=channel_id, thread_ts=thread_ts,
+                text="✅ No pending error to retry.",
             )
         except Exception:
             pass
         return
-    
-    # Retrieve and clear retry state
-    message = state.retry_message
+
+    message             = state.retry_message
     state.retry_message = ""
-    state.last_error = ""
-    state.retry_config = None
-    
-    # Prepare fresh cancellation event
-    state.cancel_event = threading.Event()
-    
-    # Start a fresh retry thread
+    state.last_error    = ""
+    state.retry_config  = None
+    state.cancel_event  = threading.Event()
+
     threading.Thread(
         target=_run_agent,
         args=(message, thread_ts, channel_id, client, say, True),
@@ -537,9 +450,6 @@ register_google_handlers(app)
 register_coding_handlers(app)
 
 
-
-
-
 # ── Slack Event Handlers ───────────────────────────────────────────────────────
 
 @app.event("app_mention")
@@ -557,14 +467,14 @@ def handle_mention(event, client, say):
         return
 
     state = get_thread_state(thread_ts)
+    state.user_id = event.get("user", "")
 
     if not state.workspace_path:
         state.pending_message = text
         state.pending_channel = channel
         try:
             result = client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
+                channel=channel, thread_ts=thread_ts,
                 text="👋 Welcome to Gemma Swarm! What would you like to do?",
                 blocks=build_graph_selector_blocks(thread_ts),
             )
@@ -573,10 +483,8 @@ def handle_mention(event, client, say):
             logger.error(f"[slack] Could not post graph selector: {e}")
         return
 
-    # Route to coding agent if this thread is in coding mode
     if getattr(state, "coding_mode", False):
         if getattr(state, "coding_active", False):
-            # Already running — queue the message
             state.pending_message = text
             try:
                 client.chat_postMessage(
@@ -621,10 +529,10 @@ def handle_message_event(event, client, say):
             return
 
     state = get_thread_state(thread_ts)
+    state.user_id = event.get("user", "")
     if not state.workspace_path:
         return
 
-    # Route to coding agent if this thread is in coding mode
     if getattr(state, "coding_mode", False):
         if getattr(state, "coding_active", False):
             state.pending_message = _strip_slack_formatting(text)
@@ -661,12 +569,10 @@ def main():
 
     load_registry_into_threads()
     load_coding_registry_into_threads()
-    # logger.info("[slack] Thread registry loaded.")
 
     try:
         result      = app.client.auth_test()
         BOT_USER_ID = result["user_id"]
-        # logger.info(f"[slack] Bot user ID: {BOT_USER_ID}")
     except Exception as e:
         logger.error(f"[slack] Could not get bot user ID: {e}")
 

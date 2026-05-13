@@ -104,11 +104,12 @@ class SupervisorAgent(BaseAgent):
                 except Exception:
                     pass
 
-            bound_tools        = [self._meta_tool] + current_tools
+            bound_tools         = [self._meta_tool] + current_tools
             self.llm_with_tools = self.llm.bind_tools(bound_tools)
-            response            = self._call_llm(llm_messages, use_tools=True)
-            raw_text            = self._extract_response_content(response)
-            tool_calls          = getattr(response, "tool_calls", None) or []
+            # _call_llm now handles push_thinking internally via self.stream_manager
+            response   = self._call_llm(llm_messages, use_tools=True)
+            raw_text   = self._extract_response_content(response)
+            tool_calls = getattr(response, "tool_calls", None) or []
 
             if not tool_calls:
                 final_text = raw_text.strip() if raw_text else ""
@@ -127,19 +128,20 @@ class SupervisorAgent(BaseAgent):
                             _tool_status_callback("load_toolset")
                         except Exception:
                             pass
+
                     toolset_names = args.get("toolset_names") or args.get("toolset_name") or []
                     if isinstance(toolset_names, str):
                         toolset_names = [toolset_names]
-                    
+
                     if session_id:
                         record_token_event(
                             session_id=session_id, event_type="tool_input",
                             token_count=estimate_tokens(str(args)),
                             model=self.model_name, project_name=project_name,
                         )
-                    
+
                     result = load_toolset(toolset_names)
-                    
+
                     if session_id:
                         record_token_event(
                             session_id=session_id, event_type="tool_output",
@@ -150,7 +152,6 @@ class SupervisorAgent(BaseAgent):
                     if result.startswith(CONFIG_MISSING_PREFIX):
                         feature = result[len(CONFIG_MISSING_PREFIX):].strip()
                         logger.info(f"[supervisor] CONFIG_MISSING: {feature}")
-                        # Strip the user's request from messages — no agent response was generated
                         cleaned_messages = list(messages)
                         for i in range(len(cleaned_messages) - 1, -1, -1):
                             if isinstance(cleaned_messages[i], HumanMessage):
@@ -171,9 +172,8 @@ class SupervisorAgent(BaseAgent):
 
                     loaded_toolset_name = ", ".join(toolset_names)
                     new_tools           = get_toolset_tools(toolset_names)
-                    # Merge without duplicating already-loaded tools
-                    existing_names = {t.name for t in current_tools}
-                    current_tools += [t for t in new_tools if t.name not in existing_names]
+                    existing_names      = {t.name for t in current_tools}
+                    current_tools      += [t for t in new_tools if t.name not in existing_names]
                     logger.info(f"[supervisor] Loaded {toolset_names}: {[t.name for t in new_tools]}")
                     llm_messages.append(ToolMessage(
                         content=f"Toolsets {toolset_names} loaded. Tools: {result}",
@@ -181,12 +181,20 @@ class SupervisorAgent(BaseAgent):
                     ))
 
                 else:
-                    # Notify Slack of tool being used (like coding agent)
+                    # setStatus text update
                     if _tool_status_callback:
                         try:
                             _tool_status_callback(name)
                         except Exception:
                             pass
+
+                    # Stream: push complete card only (no in_progress — Slack appends, not updates)
+                    task_id = None
+                    if self.stream_manager:
+                        try:
+                            task_id = self.stream_manager.next_tool_id()
+                        except Exception as e:
+                            logger.debug(f"[supervisor] next_tool_id failed: {e}")
 
                     tool_fn = next((t for t in current_tools if t.name == name), None)
                     if tool_fn is None:
@@ -196,6 +204,8 @@ class SupervisorAgent(BaseAgent):
                             tool_result = str(tool_fn.invoke(args))
                         except Exception as e:
                             tool_result = f"Tool error ({name}): {e}"
+
+                    is_error = tool_result.startswith("Error:") or tool_result.startswith("Tool error")
 
                     if session_id:
                         record_token_event(
@@ -209,6 +219,19 @@ class SupervisorAgent(BaseAgent):
                             model=self.model_name, project_name=project_name,
                         )
 
+                    # Stream: push complete/error card
+                    if self.stream_manager and task_id:
+                        try:
+                            self.stream_manager.push_tool_end(
+                                task_id=task_id,
+                                tool_name=name,
+                                tool_input=str(args),
+                                tool_output=tool_result,
+                                error=is_error,
+                            )
+                        except Exception as e:
+                            logger.debug(f"[supervisor] push_tool_end failed: {e}")
+
                     logger.info(f"[supervisor] {name} → {tool_result[:120]}")
                     llm_messages.append(ToolMessage(content=tool_result, tool_call_id=tool_id))
 
@@ -221,7 +244,6 @@ class SupervisorAgent(BaseAgent):
                 final_text: str, loaded_toolset_name: str) -> dict:
         new_messages = original_messages + [AIMessage(content=final_text)]
 
-        # Context snapshot
         try:
             snapshot_context_usage(
                 session_id=state.get("slack_thread_ts", ""),
@@ -239,7 +261,7 @@ class SupervisorAgent(BaseAgent):
 
         return {
             "messages":       new_messages,
-            "next_node":      "validator",   # always — no routing decisions here
+            "next_node":      "validator",
             "task_complete":  True,
             "active_agent":   "supervisor",
             "loaded_toolset": loaded_toolset_name,
@@ -261,9 +283,6 @@ def get_supervisor_agent() -> SupervisorAgent:
 def supervisor_agent_node(state: AgentState) -> dict:
     agent = get_supervisor_agent()
 
-    # Inject Slack context for blocking tools (email, linkedin, google write)
-    # _slack_client is set by graph.set_slack_client() which is called from slack_app
-    # Import lazily to avoid circular import (graph imports supervisor)
     try:
         import agents_utils.graph as _graph_module
         slack_client = getattr(_graph_module, "_slack_client", None)
@@ -274,7 +293,6 @@ def supervisor_agent_node(state: AgentState) -> dict:
     channel   = state.get("slack_channel", "")
     set_slack_context(slack_client, thread_ts, channel)
 
-    # Launch UI before thinking starts so it's visible during the whole session
     try:
         launch_context_ui()
     except Exception as e:

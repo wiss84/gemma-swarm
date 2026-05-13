@@ -34,6 +34,7 @@ class ThreadState:
     active_channel:   str             = ""
     # Channel ID for this thread (used to match file uploads to correct thread)
     channel_id:        str             = ""
+    user_id:           str             = ""  # Slack user ID of the message sender
     # File attachment paths
     email_attachment_path:    str = ""
     linkedin_attachment_path: str = ""

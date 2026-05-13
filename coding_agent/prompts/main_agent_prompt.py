@@ -81,6 +81,8 @@ Your conversation history is wiped after every completed task. Your persistent m
 If project_TODO.md does not exist, this is the first interaction — there is no prior history.
 If it exists, read it before doing anything else.
 
+**Tool calls:** Tool inputs and tool outputs calls are not stored in your memory after each conversation turn. This is intentional to avoid context rot. Trust your workspace files and project_TODO.md instead.
+
 ---
 
 ### [TWO MODES]
