@@ -167,6 +167,18 @@ class SupervisorAgent(BaseAgent):
                         }
 
                     if result.startswith("ERROR:"):
+                        if self.stream_manager:
+                            try:
+                                task_id = self.stream_manager.next_tool_id()
+                                self.stream_manager.push_tool_end(
+                                    task_id=task_id,
+                                    tool_name="load_toolset",
+                                    tool_input=str(args),
+                                    tool_output=result,
+                                    error=True,
+                                )
+                            except Exception as e:
+                                logger.debug(f"[supervisor] push_tool_end(load_toolset) failed: {e}")
                         llm_messages.append(ToolMessage(content=result, tool_call_id=tool_id))
                         continue
 
@@ -175,6 +187,21 @@ class SupervisorAgent(BaseAgent):
                     existing_names      = {t.name for t in current_tools}
                     current_tools      += [t for t in new_tools if t.name not in existing_names]
                     logger.info(f"[supervisor] Loaded {toolset_names}: {[t.name for t in new_tools]}")
+
+                    if self.stream_manager:
+                        try:
+                            task_id = self.stream_manager.next_tool_id()
+                            tool_names_loaded = ", ".join(t.name for t in new_tools)
+                            self.stream_manager.push_tool_end(
+                                task_id=task_id,
+                                tool_name="load_toolset",
+                                tool_input=str(args),
+                                tool_output=f"Loaded: {tool_names_loaded}",
+                                error=False,
+                            )
+                        except Exception as e:
+                            logger.debug(f"[supervisor] push_tool_end(load_toolset) failed: {e}")
+
                     llm_messages.append(ToolMessage(
                         content=f"Toolsets {toolset_names} loaded. Tools: {result}",
                         tool_call_id=tool_id,
