@@ -14,6 +14,7 @@ Built on **Google's Gemma 4 models** (free tier) and powered by completely free 
 
 ## Video Demos
 
+- **UI Enhancment** — New UI visuals and card blocks: https://youtu.be/1xhXDvsD9IY
 - 📧 **Email Workflow** — Compose, get feedback, send with interrupts: https://youtu.be/LfiQYaT1l9Q
 - 🤖 **Autonomous Mode** — Background research & LinkedIn posting: https://youtu.be/u5iaSv6Hi2U
 - 💻 **Coding Agent** — Autonomous coding from Slack: https://youtu.be/ZCeozC2UQQc
@@ -61,7 +62,7 @@ No worries, We got you. Download the Slack app on your phone and stay in control
 
 ### 1. Download
 ```bash
-git clone https://github.com/yourusername/gemma-swarm.git
+git clone https://github.com/wiss84/gemma-swarm.git
 ```
 
 ### 2. Get API Keys
@@ -92,7 +93,7 @@ Create a `.env` file in the project root:
 # Google Gemma API (required)
 GOOGLE_API_KEY=your_google_api_key
 
-# Jina AI — web search (required)
+# Jina AI — web search (optional)
 JINA_API_KEY=your_jina_api_key
 
 # Slack (required)
